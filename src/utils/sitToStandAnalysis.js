@@ -117,6 +117,13 @@ let shoulderHeightHistory = [];
 const HEIGHT_HISTORY_SIZE = 30;
 let initialStandingHeight = null; // 서 있을 때의 기준 높이
 
+// 손 위치 추적 (밀기 감지용)
+let wristPositionHistory = [];
+const WRIST_HISTORY_SIZE = 20;
+let transitionStartWristY = null; // 일어서기 시작할 때 손목 Y 위치
+let transitionStartShoulderY = null; // 일어서기 시작할 때 어깨 Y 위치
+let pushedDuringTransition = false; // 일어서는 동안 밀기 감지 여부
+
 /**
  * 상태 히스토리 기반 안정화 (히스테리시스 적용)
  * - 한번 확정된 상태는 쉽게 바뀌지 않음
@@ -191,6 +198,11 @@ export function resetStateHistory() {
   initialStandingHeight = null;
   confirmedState = null;
   stateConfirmCount = 0;
+  // 손 추적 초기화
+  wristPositionHistory = [];
+  transitionStartWristY = null;
+  transitionStartShoulderY = null;
+  pushedDuringTransition = false;
 }
 
 /**
@@ -491,9 +503,37 @@ function detectStanding(landmarks) {
 }
 
 /**
- * 손 위치 감지 (일어서는 동안 손 사용 체크)
+ * 손목 위치 히스토리 업데이트
  */
-function detectHandPosition(landmarks, currentPosture, previousPosture) {
+function updateWristHistory(wristY, shoulderY, kneeY, elbowAngle) {
+  const now = Date.now();
+  wristPositionHistory.push({
+    wristY,
+    shoulderY,
+    kneeY,
+    elbowAngle,
+    timestamp: now
+  });
+
+  // 오래된 데이터 제거
+  if (wristPositionHistory.length > WRIST_HISTORY_SIZE) {
+    wristPositionHistory.shift();
+  }
+}
+
+/**
+ * 밀기 동작 감지 (핵심 로직)
+ *
+ * 밀기의 특징:
+ * 1. 손목이 무릎 근처에서 아래로 눌리는 움직임
+ * 2. 팔꿈치가 펴지는 움직임 (밀 때 팔이 펴짐)
+ * 3. 어깨는 올라가는데 손목은 그대로이거나 덜 올라감
+ *
+ * 밀지 않는 경우:
+ * 1. 손목이 어깨와 함께 자연스럽게 올라감
+ * 2. 손목이 무릎에서 빨리 떨어짐
+ */
+function detectPushingMotion(landmarks, currentPosture, previousPosture, isTransitioning) {
   const leftWrist = landmarks[LANDMARKS.LEFT_WRIST];
   const rightWrist = landmarks[LANDMARKS.RIGHT_WRIST];
   const leftElbow = landmarks[LANDMARKS.LEFT_ELBOW];
@@ -505,6 +545,127 @@ function detectHandPosition(landmarks, currentPosture, previousPosture) {
   const leftShoulder = landmarks[LANDMARKS.LEFT_SHOULDER];
   const rightShoulder = landmarks[LANDMARKS.RIGHT_SHOULDER];
 
+  const kneeY = (leftKnee?.y + rightKnee?.y) / 2 || 0.7;
+  const hipY = (leftHip?.y + rightHip?.y) / 2 || 0.5;
+  const shoulderY = (leftShoulder?.y + rightShoulder?.y) / 2 || 0.3;
+  const avgWristY = ((leftWrist?.y || 1) + (rightWrist?.y || 1)) / 2;
+
+  // 팔꿈치 각도 계산 (어깨-팔꿈치-손목)
+  let leftElbowAngle = 180, rightElbowAngle = 180;
+  if (isVisible(leftShoulder) && isVisible(leftElbow) && isVisible(leftWrist)) {
+    leftElbowAngle = calculateAngle(leftShoulder, leftElbow, leftWrist);
+  }
+  if (isVisible(rightShoulder) && isVisible(rightElbow) && isVisible(rightWrist)) {
+    rightElbowAngle = calculateAngle(rightShoulder, rightElbow, rightWrist);
+  }
+  const avgElbowAngle = (leftElbowAngle + rightElbowAngle) / 2;
+
+  // 히스토리 업데이트
+  updateWristHistory(avgWristY, shoulderY, kneeY, avgElbowAngle);
+
+  // 손이 무릎/허벅지 근처에 있는지
+  const handsNearKnee = avgWristY >= hipY - 0.08 && avgWristY <= kneeY + 0.15;
+
+  // 일어서기 시작 시점 기록
+  if (previousPosture === PostureState.SITTING && isTransitioning && transitionStartWristY === null) {
+    transitionStartWristY = avgWristY;
+    transitionStartShoulderY = shoulderY;
+  }
+
+  // 완전히 서면 트랜지션 정보 초기화
+  if (currentPosture === PostureState.STANDING && !isTransitioning) {
+    // 이미 감지된 pushing 상태는 유지 (점수 계산용)
+    if (!pushedDuringTransition) {
+      transitionStartWristY = null;
+      transitionStartShoulderY = null;
+    }
+  }
+
+  // 밀기 동작 감지 로직
+  let isPushing = false;
+  let pushReason = '';
+
+  if (isTransitioning && handsNearKnee && transitionStartWristY !== null && wristPositionHistory.length >= 5) {
+    // 최근 5프레임 분석
+    const recentHistory = wristPositionHistory.slice(-5);
+    const oldHistory = wristPositionHistory.slice(0, Math.min(5, wristPositionHistory.length));
+
+    // 1. 어깨 움직임 대비 손목 움직임 비교
+    const shoulderRise = transitionStartShoulderY - shoulderY; // 양수 = 어깨가 올라감
+    const wristRise = transitionStartWristY - avgWristY; // 양수 = 손목이 올라감
+
+    // 어깨는 많이 올라갔는데 손목은 적게 올라갔으면 = 밀고 있음
+    // (정상: 손목도 어깨와 비슷하게 올라감)
+    if (shoulderRise > 0.05) { // 어깨가 5% 이상 올라간 경우
+      const riseRatio = wristRise / shoulderRise;
+      if (riseRatio < 0.3) { // 손목이 어깨의 30% 미만으로 올라감
+        isPushing = true;
+        pushReason = '손목이 무릎에 고정된 채 상체만 올라감';
+      }
+    }
+
+    // 2. 손목이 아래로 눌리는 움직임 감지
+    const oldWristY = oldHistory.length > 0 ?
+      oldHistory.reduce((sum, h) => sum + h.wristY, 0) / oldHistory.length : avgWristY;
+    const recentWristY = recentHistory.reduce((sum, h) => sum + h.wristY, 0) / recentHistory.length;
+
+    // 손목이 아래로 이동 (0.02 이상) = 누르고 있음
+    if (recentWristY > oldWristY + 0.02) {
+      isPushing = true;
+      pushReason = '손목이 아래로 눌림 (밀기 동작)';
+    }
+
+    // 3. 팔꿈치 각도 변화 감지 (펴지면 밀기)
+    const oldElbowAngle = oldHistory.length > 0 ?
+      oldHistory.reduce((sum, h) => sum + h.elbowAngle, 0) / oldHistory.length : avgElbowAngle;
+    const recentElbowAngle = recentHistory.reduce((sum, h) => sum + h.elbowAngle, 0) / recentHistory.length;
+
+    // 팔꿈치가 15도 이상 펴지면서 손이 무릎 근처 = 밀기
+    if (recentElbowAngle > oldElbowAngle + 15 && handsNearKnee) {
+      isPushing = true;
+      pushReason = '팔꿈치가 펴지며 밀기';
+    }
+
+    // 4. 손이 무릎 위에서 오래 머무름 (일어서는 동안)
+    const framesOnKnee = recentHistory.filter(h => {
+      const wristNearKnee = h.wristY >= hipY - 0.08 && h.wristY <= kneeY + 0.15;
+      return wristNearKnee;
+    }).length;
+
+    if (framesOnKnee >= 4 && shoulderRise > 0.08) { // 5개 중 4개 이상이 무릎 근처
+      isPushing = true;
+      pushReason = '일어서는 동안 손이 무릎에 오래 머무름';
+    }
+  }
+
+  // 밀기 감지되면 플래그 설정
+  if (isPushing) {
+    pushedDuringTransition = true;
+  }
+
+  return {
+    isPushing,
+    pushReason,
+    handsNearKnee,
+    wristY: avgWristY,
+    shoulderY,
+    elbowAngle: avgElbowAngle
+  };
+}
+
+/**
+ * 손 위치 감지 (일어서는 동안 손 사용 체크) - 개선된 버전
+ */
+function detectHandPosition(landmarks, currentPosture, previousPosture) {
+  const leftWrist = landmarks[LANDMARKS.LEFT_WRIST];
+  const rightWrist = landmarks[LANDMARKS.RIGHT_WRIST];
+  const leftShoulder = landmarks[LANDMARKS.LEFT_SHOULDER];
+  const rightShoulder = landmarks[LANDMARKS.RIGHT_SHOULDER];
+  const leftKnee = landmarks[LANDMARKS.LEFT_KNEE];
+  const rightKnee = landmarks[LANDMARKS.RIGHT_KNEE];
+  const leftHip = landmarks[LANDMARKS.LEFT_HIP];
+  const rightHip = landmarks[LANDMARKS.RIGHT_HIP];
+
   if (!isVisible(leftWrist) && !isVisible(rightWrist)) {
     return { position: HandPosition.UNKNOWN, support: HandSupportState.UNKNOWN, message: '' };
   }
@@ -512,22 +673,21 @@ function detectHandPosition(landmarks, currentPosture, previousPosture) {
   const kneeY = (leftKnee?.y + rightKnee?.y) / 2 || 0.7;
   const hipY = (leftHip?.y + rightHip?.y) / 2 || 0.5;
   const shoulderY = (leftShoulder?.y + rightShoulder?.y) / 2 || 0.3;
+  const avgWristY = ((leftWrist?.y || 1) + (rightWrist?.y || 1)) / 2;
 
-  const leftWristY = leftWrist?.y || 1;
-  const rightWristY = rightWrist?.y || 1;
-  const avgWristY = (leftWristY + rightWristY) / 2;
+  // 손이 무릎 근처에 있는지
+  const handsNearKnee = avgWristY >= hipY - 0.08 && avgWristY <= kneeY + 0.15;
 
-  // 손이 무릎 근처 또는 허벅지 위에 있는지
-  const handsNearKnee = avgWristY >= hipY - 0.05 && avgWristY <= kneeY + 0.1;
-  const handsOnThigh = avgWristY >= hipY - 0.05 && avgWristY <= hipY + 0.15;
-
-  // 일어서는 동작 중인지 확인
+  // 일어서는 동작 중인지
   const isTransitioning = previousPosture === PostureState.SITTING &&
                           currentPosture !== PostureState.SITTING;
 
-  // 앉아있을 때 손이 무릎 위에 있는 것은 OK
+  // 밀기 동작 감지
+  const pushResult = detectPushingMotion(landmarks, currentPosture, previousPosture, isTransitioning);
+
+  // === 앉아 있을 때 ===
   if (currentPosture === PostureState.SITTING && !isTransitioning) {
-    if (handsNearKnee || handsOnThigh) {
+    if (handsNearKnee) {
       return {
         position: HandPosition.HANDS_ON_KNEE,
         support: HandSupportState.NO_SUPPORT,
@@ -536,29 +696,51 @@ function detectHandPosition(landmarks, currentPosture, previousPosture) {
     }
   }
 
-  // 일어서는 중이거나 일어선 후에 손이 무릎/허벅지에 있으면 감점
-  if (handsNearKnee || handsOnThigh) {
-    if (currentPosture === PostureState.STANDING || isTransitioning || previousPosture === PostureState.SITTING) {
+  // === 일어서는 중 ===
+  if (isTransitioning) {
+    // 밀기 동작 감지됨
+    if (pushResult.isPushing || pushedDuringTransition) {
       return {
         position: HandPosition.HANDS_PUSHING,
         support: HandSupportState.HEAVY_SUPPORT,
-        message: '⚠️ 무릎을 짚고 일어남 (감점)',
+        message: `⚠️ 무릎 짚고 밀어서 일어남 (감점)`,
+      };
+    }
+
+    // 손이 무릎 근처지만 밀지 않음
+    if (handsNearKnee) {
+      return {
+        position: HandPosition.HANDS_ON_KNEE,
+        support: HandSupportState.NO_SUPPORT,
+        message: '손 무릎 위 (밀지 않음)',
       };
     }
   }
 
-  // 손이 어깨 위에 있으면 OK
-  if (avgWristY < shoulderY) {
-    return {
-      position: HandPosition.HANDS_UP,
-      support: HandSupportState.NO_SUPPORT,
-      message: '✓ 손 올림'
-    };
+  // === 서 있을 때 ===
+  if (currentPosture === PostureState.STANDING) {
+    // 일어서는 동안 밀었으면 감점 유지
+    if (pushedDuringTransition) {
+      return {
+        position: HandPosition.HANDS_PUSHING,
+        support: HandSupportState.HEAVY_SUPPORT,
+        message: '⚠️ 무릎 짚고 일어남 (감점)',
+      };
+    }
+
+    // 손이 어깨 위에 있으면 OK
+    if (avgWristY < shoulderY) {
+      return {
+        position: HandPosition.HANDS_UP,
+        support: HandSupportState.NO_SUPPORT,
+        message: '✓ 정상적으로 일어섬'
+      };
+    }
   }
 
   return {
     position: HandPosition.UNKNOWN,
-    support: HandSupportState.UNKNOWN,
+    support: HandSupportState.NO_SUPPORT,
     message: ''
   };
 }
