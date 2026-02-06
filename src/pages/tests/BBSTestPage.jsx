@@ -120,10 +120,6 @@ function BBSTestPage() {
   // 동영상 업로드 (측면/정면)
   const [sideVideoUrl, setSideVideoUrl] = useState(null); // 측면 영상
   const [frontVideoUrl, setFrontVideoUrl] = useState(null); // 정면 영상
-  const [activeVideoView, setActiveVideoView] = useState('side'); // 'side' 또는 'front' - 현재 분석 중인 뷰
-  const [isVideoPaused, setIsVideoPaused] = useState(false);
-  const [videoProgress, setVideoProgress] = useState(0);
-  const [videoDuration, setVideoDuration] = useState(0);
 
   // 카메라/분석 상태
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -161,17 +157,38 @@ function BBSTestPage() {
     message: ''
   });
 
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
+  // 측면 영상 refs
+  const sideVideoRef = useRef(null);
+  const sideCanvasRef = useRef(null);
+  const sidePoseRef = useRef(null);
+  const sideAnalysisRef = useRef(null); // 측면 분석 루프 ID
+
+  // 정면 영상 refs
+  const frontVideoRef = useRef(null);
+  const frontCanvasRef = useRef(null);
+  const frontPoseRef = useRef(null);
+  const frontAnalysisRef = useRef(null); // 정면 분석 루프 ID
+
+  // 공용 refs
   const timerRef = useRef(null);
-  const poseRef = useRef(null);
   const cameraRef = useRef(null);
   const analysisHistoryRef = useRef([]);
   const previousAnalysisRef = useRef(null);
   const startTimeRef = useRef(null);
   const sideFileInputRef = useRef(null); // 측면 영상 파일 입력
   const frontFileInputRef = useRef(null); // 정면 영상 파일 입력
-  const videoAnalysisRef = useRef(null); // 동영상 분석 루프 ID
+
+  // 양쪽 영상 상태
+  const [sideVideoProgress, setSideVideoProgress] = useState(0);
+  const [frontVideoProgress, setFrontVideoProgress] = useState(0);
+  const [sideVideoDuration, setSideVideoDuration] = useState(0);
+  const [frontVideoDuration, setFrontVideoDuration] = useState(0);
+  const [isSideVideoPaused, setIsSideVideoPaused] = useState(false);
+  const [isFrontVideoPaused, setIsFrontVideoPaused] = useState(false);
+
+  // 측면/정면 랜드마크 (분석용)
+  const [sideLandmarks, setSideLandmarks] = useState(null);
+  const [frontLandmarks, setFrontLandmarks] = useState(null);
 
   const { navigateTo } = useNavigation();
   const { addTestResult } = useTestHistory();
@@ -713,8 +730,8 @@ function BBSTestPage() {
 
     const url = URL.createObjectURL(file);
     setSideVideoUrl(url);
-    setVideoProgress(0);
-    setVideoDuration(0);
+    setSideVideoProgress(0);
+    setSideVideoDuration(0);
   }, [sideVideoUrl]);
 
   // 정면 동영상 업로드 핸들러
@@ -729,80 +746,65 @@ function BBSTestPage() {
 
     const url = URL.createObjectURL(file);
     setFrontVideoUrl(url);
+    setFrontVideoProgress(0);
+    setFrontVideoDuration(0);
   }, [frontVideoUrl]);
 
-  // 현재 활성 영상 URL 가져오기
-  const getActiveVideoUrl = useCallback(() => {
-    return activeVideoView === 'side' ? sideVideoUrl : frontVideoUrl;
-  }, [activeVideoView, sideVideoUrl, frontVideoUrl]);
+  // 단일 영상 분석 초기화 헬퍼 함수
+  const initSingleVideoAnalysis = useCallback(async (
+    videoRef, canvasRef, poseRef, analysisRef,
+    videoUrl, setProgress, setDuration, setPaused, setLandmarks, viewType
+  ) => {
+    if (!videoRef.current || !canvasRef.current || !videoUrl) {
+      return null;
+    }
 
-  // 동영상 분석 초기화
-  const initVideoAnalysis = useCallback(async () => {
-    setCameraLoading(true);
+    const video = videoRef.current;
+    video.src = videoUrl;
+    video.muted = true;
 
-    try {
-      // 기존 분석 정리
-      if (videoAnalysisRef.current) {
-        cancelAnimationFrame(videoAnalysisRef.current);
-        videoAnalysisRef.current = null;
-      }
+    // 비디오 로드 대기
+    await new Promise((resolve, reject) => {
+      video.onloadeddata = resolve;
+      video.onerror = reject;
+      video.load();
+    });
 
-      if (!videoRef.current || !canvasRef.current) {
-        console.error('Video or canvas ref not available');
-        setCameraLoading(false);
-        return null;
-      }
+    setDuration(video.duration);
 
-      const activeUrl = getActiveVideoUrl();
-      if (!activeUrl) {
-        console.error('No video URL available');
-        setCameraLoading(false);
-        return null;
-      }
+    const { Pose } = await import('@mediapipe/pose');
 
-      const video = videoRef.current;
-      video.src = activeUrl;
-      video.muted = true;
+    const pose = new Pose({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+    });
 
-      // 비디오 로드 대기
-      await new Promise((resolve, reject) => {
-        video.onloadeddata = resolve;
-        video.onerror = reject;
-        video.load();
-      });
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      enableSegmentation: false,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
 
-      setVideoDuration(video.duration);
+    pose.onResults((results) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
 
-      const { Pose } = await import('@mediapipe/pose');
+      const ctx = canvas.getContext('2d');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
 
-      const pose = new Pose({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
-      });
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
-      pose.setOptions({
-        modelComplexity: 1,
-        smoothLandmarks: true,
-        enableSegmentation: false,
-        minDetectionConfidence: 0.6,
-        minTrackingConfidence: 0.6
-      });
+      if (results.poseLandmarks) {
+        setLandmarks(results.poseLandmarks);
 
-      pose.onResults((results) => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
+        let skeletonColor = '#3B82F6';
 
-        const ctx = canvas.getContext('2d');
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-
-        ctx.save();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
-
-        if (results.poseLandmarks) {
-          setCurrentLandmarks(results.poseLandmarks);
-
-          let skeletonColor = '#3B82F6';
+        // 측면 영상에서만 주요 분석 수행 (정면은 보조)
+        if (viewType === 'side') {
           if (isItem1) {
             const analysis = handleItem1Analysis(results.poseLandmarks);
             skeletonColor = analysis.state === PostureState.SITTING ? '#EAB308' :
@@ -819,117 +821,156 @@ function BBSTestPage() {
           } else {
             handleGeneralAnalysis(results.poseLandmarks);
           }
-
-          drawConnections(ctx, results.poseLandmarks, canvas.width, canvas.height, {
-            strokeStyle: skeletonColor,
-            lineWidth: 3
-          });
-          drawLandmarks(ctx, results.poseLandmarks, canvas.width, canvas.height, {
-            fillStyle: skeletonColor,
-            radius: 5
-          });
+        } else {
+          // 정면 영상 - 파란색 스켈레톤만 표시
+          skeletonColor = '#8B5CF6'; // 보라색으로 구분
         }
 
-        ctx.restore();
-      });
+        drawConnections(ctx, results.poseLandmarks, canvas.width, canvas.height, {
+          strokeStyle: skeletonColor,
+          lineWidth: 3
+        });
+        drawLandmarks(ctx, results.poseLandmarks, canvas.width, canvas.height, {
+          fillStyle: skeletonColor,
+          radius: 5
+        });
+      }
 
-      poseRef.current = pose;
+      ctx.restore();
+    });
 
-      // 비디오 프레임 분석 루프
-      const analyzeVideoFrame = async () => {
-        if (!video || video.paused || video.ended) {
-          if (video.ended) {
-            setIsVideoPaused(true);
-          }
-          return;
+    poseRef.current = pose;
+
+    // 비디오 프레임 분석 루프
+    const analyzeVideoFrame = async () => {
+      if (!video || video.paused || video.ended) {
+        if (video.ended) {
+          setPaused(true);
         }
+        return;
+      }
 
-        setVideoProgress(video.currentTime);
+      setProgress(video.currentTime);
 
-        if (poseRef.current && video.readyState >= 2) {
-          try {
-            await poseRef.current.send({ image: video });
-          } catch (e) {
-            console.log('Video frame analysis error:', e);
-          }
+      if (poseRef.current && video.readyState >= 2) {
+        try {
+          await poseRef.current.send({ image: video });
+        } catch (e) {
+          console.log('Video frame analysis error:', e);
         }
+      }
 
-        videoAnalysisRef.current = requestAnimationFrame(analyzeVideoFrame);
-      };
+      analysisRef.current = requestAnimationFrame(analyzeVideoFrame);
+    };
 
-      // 비디오 재생 시작
-      await video.play();
-      setIsVideoPaused(false);
-      analyzeVideoFrame();
+    // 비디오 재생 시작
+    await video.play();
+    setPaused(false);
+    analyzeVideoFrame();
+
+    return true;
+  }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
+
+  // 양쪽 동영상 동시 분석 초기화
+  const initVideoAnalysis = useCallback(async () => {
+    setCameraLoading(true);
+
+    try {
+      // 기존 분석 정리
+      if (sideAnalysisRef.current) {
+        cancelAnimationFrame(sideAnalysisRef.current);
+        sideAnalysisRef.current = null;
+      }
+      if (frontAnalysisRef.current) {
+        cancelAnimationFrame(frontAnalysisRef.current);
+        frontAnalysisRef.current = null;
+      }
+
+      // 양쪽 영상 동시 초기화
+      const [sideResult, frontResult] = await Promise.all([
+        sideVideoUrl ? initSingleVideoAnalysis(
+          sideVideoRef, sideCanvasRef, sidePoseRef, sideAnalysisRef,
+          sideVideoUrl, setSideVideoProgress, setSideVideoDuration, setIsSideVideoPaused, setSideLandmarks, 'side'
+        ) : null,
+        frontVideoUrl ? initSingleVideoAnalysis(
+          frontVideoRef, frontCanvasRef, frontPoseRef, frontAnalysisRef,
+          frontVideoUrl, setFrontVideoProgress, setFrontVideoDuration, setIsFrontVideoPaused, setFrontLandmarks, 'front'
+        ) : null
+      ]);
 
       setCameraLoading(false);
-      return true;
+      return sideResult || frontResult;
     } catch (error) {
       console.error('Video analysis init error:', error);
       setCameraLoading(false);
       return null;
     }
-  }, [getActiveVideoUrl, isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
+  }, [sideVideoUrl, frontVideoUrl, initSingleVideoAnalysis]);
 
-  // 동영상 재생/일시정지 토글
+  // 동영상 재생/일시정지 토글 (양쪽 동시)
   const toggleVideoPause = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const sideVideo = sideVideoRef.current;
+    const frontVideo = frontVideoRef.current;
 
-    if (video.paused) {
-      video.play();
-      setIsVideoPaused(false);
-      // 분석 재개
-      const analyzeVideoFrame = async () => {
-        if (!video || video.paused || video.ended) return;
-        setVideoProgress(video.currentTime);
-        if (poseRef.current && video.readyState >= 2) {
-          try {
-            await poseRef.current.send({ image: video });
-          } catch (e) {}
-        }
-        videoAnalysisRef.current = requestAnimationFrame(analyzeVideoFrame);
-      };
-      analyzeVideoFrame();
-    } else {
-      video.pause();
-      setIsVideoPaused(true);
-      if (videoAnalysisRef.current) {
-        cancelAnimationFrame(videoAnalysisRef.current);
+    const isPaused = (sideVideo && sideVideo.paused) || (frontVideo && frontVideo.paused);
+
+    if (isPaused) {
+      // 재생
+      if (sideVideo) sideVideo.play();
+      if (frontVideo) frontVideo.play();
+      setIsSideVideoPaused(false);
+      setIsFrontVideoPaused(false);
+
+      // 분석 재개 - 측면
+      if (sideVideo && sidePoseRef.current) {
+        const analyzeSideFrame = async () => {
+          if (!sideVideo || sideVideo.paused || sideVideo.ended) return;
+          setSideVideoProgress(sideVideo.currentTime);
+          if (sidePoseRef.current && sideVideo.readyState >= 2) {
+            try { await sidePoseRef.current.send({ image: sideVideo }); } catch (e) {}
+          }
+          sideAnalysisRef.current = requestAnimationFrame(analyzeSideFrame);
+        };
+        analyzeSideFrame();
       }
+
+      // 분석 재개 - 정면
+      if (frontVideo && frontPoseRef.current) {
+        const analyzeFrontFrame = async () => {
+          if (!frontVideo || frontVideo.paused || frontVideo.ended) return;
+          setFrontVideoProgress(frontVideo.currentTime);
+          if (frontPoseRef.current && frontVideo.readyState >= 2) {
+            try { await frontPoseRef.current.send({ image: frontVideo }); } catch (e) {}
+          }
+          frontAnalysisRef.current = requestAnimationFrame(analyzeFrontFrame);
+        };
+        analyzeFrontFrame();
+      }
+    } else {
+      // 일시정지
+      if (sideVideo) sideVideo.pause();
+      if (frontVideo) frontVideo.pause();
+      setIsSideVideoPaused(true);
+      setIsFrontVideoPaused(true);
+      if (sideAnalysisRef.current) cancelAnimationFrame(sideAnalysisRef.current);
+      if (frontAnalysisRef.current) cancelAnimationFrame(frontAnalysisRef.current);
     }
   }, []);
 
-  // 동영상 시간 이동
+  // 동영상 시간 이동 (양쪽 동시)
   const seekVideo = useCallback((time) => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.currentTime = time;
-    setVideoProgress(time);
+    const sideVideo = sideVideoRef.current;
+    const frontVideo = frontVideoRef.current;
+
+    if (sideVideo) {
+      sideVideo.currentTime = time;
+      setSideVideoProgress(time);
+    }
+    if (frontVideo) {
+      frontVideo.currentTime = time;
+      setFrontVideoProgress(time);
+    }
   }, []);
-
-  // 뷰 전환 (측면/정면)
-  const switchVideoView = useCallback(async (newView) => {
-    if (newView === activeVideoView) return;
-
-    // 현재 분석 중지
-    if (videoAnalysisRef.current) {
-      cancelAnimationFrame(videoAnalysisRef.current);
-      videoAnalysisRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.pause();
-    }
-
-    setActiveVideoView(newView);
-    setVideoProgress(0);
-    setVideoDuration(0);
-
-    // 새 영상으로 분석 시작
-    setTimeout(async () => {
-      await initVideoAnalysis();
-    }, 100);
-  }, [activeVideoView, initVideoAnalysis]);
 
   // 항목 시작
   const startItem = async () => {
@@ -1005,22 +1046,33 @@ function BBSTestPage() {
       setItemTimer(elapsed);
     }, 100);
 
-    // 동영상 분석 시작 (측면 영상부터)
-    setActiveVideoView('side');
+    // 동영상 분석 시작 (양쪽 동시)
     await initVideoAnalysis();
   };
+
+  // 양쪽 동영상 분석 정리 헬퍼
+  const stopAllVideoAnalysis = useCallback(() => {
+    if (sideAnalysisRef.current) {
+      cancelAnimationFrame(sideAnalysisRef.current);
+      sideAnalysisRef.current = null;
+    }
+    if (frontAnalysisRef.current) {
+      cancelAnimationFrame(frontAnalysisRef.current);
+      frontAnalysisRef.current = null;
+    }
+    if (sideVideoRef.current) {
+      sideVideoRef.current.pause();
+    }
+    if (frontVideoRef.current) {
+      frontVideoRef.current.pause();
+    }
+  }, []);
 
   // 점수 저장
   const handleScore = (score) => {
     if (timerRef.current) clearInterval(timerRef.current);
     // 동영상 분석 정리
-    if (videoAnalysisRef.current) {
-      cancelAnimationFrame(videoAnalysisRef.current);
-      videoAnalysisRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.pause();
-    }
+    stopAllVideoAnalysis();
 
     const newScores = [...scores];
     newScores[currentItem] = score;
@@ -1082,13 +1134,7 @@ function BBSTestPage() {
       cameraRef.current = null;
     }
     // 동영상 분석 정리
-    if (videoAnalysisRef.current) {
-      cancelAnimationFrame(videoAnalysisRef.current);
-      videoAnalysisRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.pause();
-    }
+    stopAllVideoAnalysis();
 
     // 음성 중단
     if ('speechSynthesis' in window) {
@@ -1154,13 +1200,7 @@ function BBSTestPage() {
       cameraRef.current = null;
     }
     // 동영상 분석 정리
-    if (videoAnalysisRef.current) {
-      cancelAnimationFrame(videoAnalysisRef.current);
-      videoAnalysisRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.pause();
-    }
+    stopAllVideoAnalysis();
 
     // 음성 중단
     if ('speechSynthesis' in window) {
@@ -1236,13 +1276,7 @@ function BBSTestPage() {
       cameraRef.current = null;
     }
     // 동영상 분석 정리
-    if (videoAnalysisRef.current) {
-      cancelAnimationFrame(videoAnalysisRef.current);
-      videoAnalysisRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.pause();
-    }
+    stopAllVideoAnalysis();
 
     // 음성 중단
     if ('speechSynthesis' in window) {
@@ -1270,8 +1304,11 @@ function BBSTestPage() {
       if (timerRef.current) clearInterval(timerRef.current);
       if (cameraRef.current) cameraRef.current.stop();
       // 동영상 분석 정리
-      if (videoAnalysisRef.current) {
-        cancelAnimationFrame(videoAnalysisRef.current);
+      if (sideAnalysisRef.current) {
+        cancelAnimationFrame(sideAnalysisRef.current);
+      }
+      if (frontAnalysisRef.current) {
+        cancelAnimationFrame(frontAnalysisRef.current);
       }
       // 업로드된 비디오 URL 해제
       if (sideVideoUrl) {
@@ -1638,183 +1675,166 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 카메라/동영상 뷰 */}
-            <div className={`aspect-[9/16] max-h-[70vh] bg-slate-800 rounded-2xl overflow-hidden relative mx-auto`}>
-              <video ref={videoRef} className="hidden" playsInline />
-              <canvas ref={canvasRef} className="w-full h-full object-contain" />
-
-              {/* 시작 전 */}
-              {!isAnalyzing && !cameraLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
-                  <div className="text-center space-y-4">
-                    <div className="w-24 h-24 mx-auto rounded-full bg-blue-500/20 flex items-center justify-center">
-                      <span className="text-5xl">🎬</span>
+            {/* 양쪽 동영상 뷰 (측면 + 정면 동시 표시) */}
+            <div className="grid grid-cols-2 gap-2">
+              {/* 측면 영상 */}
+              <div className="relative">
+                <div className="text-center text-slate-300 font-medium mb-1 text-sm">📐 측면</div>
+                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+                  <video ref={sideVideoRef} className="hidden" playsInline muted />
+                  <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
+                  {!sideVideoUrl && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-slate-500 text-sm">영상 없음</span>
                     </div>
-                    <p className="text-slate-300">
-                      동영상 분석을 시작합니다
-                    </p>
-                    <Button variant="bbs" size="lg" onClick={startItem}>
-                      검사 시작
-                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* 정면 영상 */}
+              <div className="relative">
+                <div className="text-center text-slate-300 font-medium mb-1 text-sm">👤 정면</div>
+                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+                  <video ref={frontVideoRef} className="hidden" playsInline muted />
+                  <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
+                  {!frontVideoUrl && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-slate-500 text-sm">영상 없음</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 시작 전 */}
+            {!isAnalyzing && !cameraLoading && (
+              <div className="mt-4 text-center">
+                <Button variant="bbs" size="lg" onClick={startItem}>
+                  검사 시작
+                </Button>
+              </div>
+            )}
+
+            {/* 로딩 중 */}
+            {cameraLoading && (
+              <div className="mt-4 text-center">
+                <div className="w-12 h-12 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <p className="text-slate-300 mt-2">동영상 분석 준비 중...</p>
+              </div>
+            )}
+
+            {/* 동영상 재생 컨트롤 (분석 중일 때) */}
+            {isAnalyzing && !cameraLoading && (
+              <div className="mt-3 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={toggleVideoPause}
+                    className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
+                  >
+                    {(isSideVideoPaused || isFrontVideoPaused) ? (
+                      <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                      </svg>
+                    )}
+                  </button>
+                  <div className="flex-1">
+                    <input
+                      type="range"
+                      min="0"
+                      max={Math.max(sideVideoDuration, frontVideoDuration) || 100}
+                      value={Math.max(sideVideoProgress, frontVideoProgress)}
+                      onChange={(e) => seekVideo(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                  <div className="text-white text-sm font-mono min-w-[80px] text-right">
+                    {Math.floor(Math.max(sideVideoProgress, frontVideoProgress) / 60)}:{String(Math.floor(Math.max(sideVideoProgress, frontVideoProgress) % 60)).padStart(2, '0')} / {Math.floor(Math.max(sideVideoDuration, frontVideoDuration) / 60)}:{String(Math.floor(Math.max(sideVideoDuration, frontVideoDuration) % 60)).padStart(2, '0')}
                   </div>
                 </div>
-              )}
+              </div>
+            )}
 
-              {/* 로딩 중 */}
-              {cameraLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
-                  <div className="text-center space-y-4">
-                    <div className="w-16 h-16 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                    <p className="text-slate-300">
-                      동영상 분석 준비 중...
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* 뷰 전환 버튼 (상단) */}
-              {isAnalyzing && !cameraLoading && (
-                <div className="absolute top-4 right-4 z-40">
-                  <div className="flex bg-slate-900/90 backdrop-blur-sm rounded-lg overflow-hidden">
-                    <button
-                      onClick={() => switchVideoView('side')}
-                      className={`px-3 py-2 text-sm font-medium transition-colors ${
-                        activeVideoView === 'side'
-                          ? 'bg-blue-500 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      📐 측면
-                    </button>
-                    <button
-                      onClick={() => switchVideoView('front')}
-                      className={`px-3 py-2 text-sm font-medium transition-colors ${
-                        activeVideoView === 'front'
-                          ? 'bg-blue-500 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      👤 정면
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* 동영상 재생 컨트롤 (분석 중일 때) */}
-              {isAnalyzing && !cameraLoading && (
-                <div className="absolute bottom-4 left-4 right-4 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3 z-30">
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={toggleVideoPause}
-                      className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
-                    >
-                      {isVideoPaused ? (
-                        <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
-                      ) : (
-                        <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                        </svg>
-                      )}
-                    </button>
-                    <div className="flex-1">
-                      <input
-                        type="range"
-                        min="0"
-                        max={videoDuration || 100}
-                        value={videoProgress}
-                        onChange={(e) => seekVideo(parseFloat(e.target.value))}
-                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                      />
-                    </div>
-                    <div className="text-white text-sm font-mono min-w-[80px] text-right">
-                      {Math.floor(videoProgress / 60)}:{String(Math.floor(videoProgress % 60)).padStart(2, '0')} / {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, '0')}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 분석 중 오버레이 */}
-              {isAnalyzing && !cameraLoading && (
-                <>
-                  {/* 상단 좌측: 자세 상태 */}
-                  <div className="absolute top-4 left-4 space-y-2">
-                    <div className={`px-4 py-2 rounded-xl backdrop-blur-sm shadow-lg ${
-                      sitToStandState.currentPosture === PostureState.SITTING ? 'bg-yellow-500' :
-                      sitToStandState.currentPosture === PostureState.STANDING ? 'bg-emerald-500' :
-                      'bg-slate-600'
-                    }`}>
-                      <p className="text-white font-bold text-xl">
-                        {sitToStandState.currentPosture === PostureState.SITTING && '🪑 앉음'}
-                        {sitToStandState.currentPosture === PostureState.STANDING && '🧍 서있음'}
-                        {sitToStandState.currentPosture === PostureState.UNKNOWN && '👀 감지 중'}
-                      </p>
-                    </div>
-
-                    {/* 손 상태 */}
-                    <div className={`px-3 py-2 rounded-lg backdrop-blur-sm ${
-                      sitToStandState.handSupport === HandSupportState.HEAVY_SUPPORT ? 'bg-red-500 animate-pulse' :
-                      sitToStandState.handPosition === HandPosition.HANDS_UP ? 'bg-emerald-500/80' :
-                      'bg-slate-700/80'
-                    }`}>
-                      <p className="text-white font-medium text-sm">
-                        {sitToStandState.handSupport === HandSupportState.HEAVY_SUPPORT && '⚠️ 손 사용! (감점)'}
-                        {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_UP && '✓ 손 OK'}
-                        {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_ON_KNEE && '손 무릎 위'}
-                        {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.UNKNOWN && '손 감지 중'}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* 상단 우측: 피드백 메시지 */}
-                  <div className={`absolute top-4 right-4 px-4 py-3 rounded-xl backdrop-blur-sm shadow-lg max-w-[250px] ${
-                    sitToStandState.feedback.type === 'success' ? 'bg-emerald-500' :
-                    sitToStandState.feedback.type === 'error' ? 'bg-red-500' :
-                    sitToStandState.feedback.type === 'warning' ? 'bg-yellow-500' :
-                    'bg-blue-500'
+            {/* 분석 상태 표시 */}
+            {isAnalyzing && !cameraLoading && (
+              <div className="mt-3 space-y-2">
+                {/* 자세 상태 */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className={`flex-1 px-3 py-2 rounded-lg text-center ${
+                    sitToStandState.currentPosture === PostureState.SITTING ? 'bg-yellow-500' :
+                    sitToStandState.currentPosture === PostureState.STANDING ? 'bg-emerald-500' :
+                    'bg-slate-600'
                   }`}>
-                    <p className="text-white font-bold text-lg">{sitToStandState.feedback.message}</p>
+                    <p className="text-white font-bold">
+                      {sitToStandState.currentPosture === PostureState.SITTING && '🪑 앉음'}
+                      {sitToStandState.currentPosture === PostureState.STANDING && '🧍 서있음'}
+                      {sitToStandState.currentPosture === PostureState.UNKNOWN && '👀 감지 중'}
+                    </p>
                   </div>
 
-                  {/* 하단: 신뢰도 바 */}
-                  <div className="absolute bottom-4 left-4 right-4">
-                    <div className="bg-slate-900/90 backdrop-blur-sm p-4 rounded-xl">
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <div className="flex justify-between text-sm mb-1">
-                            <span className="text-yellow-400">앉음</span>
-                            <span className="text-white font-bold">{Math.round(sitToStandState.sittingConfidence)}%</span>
-                          </div>
-                          <div className="w-full bg-slate-700 rounded-full h-4">
-                            <div
-                              className={`h-4 rounded-full transition-all duration-300 ${
-                                sitToStandState.testPhase === 'sitting_confirmed' ? 'bg-yellow-400' : 'bg-yellow-500/50'
-                              }`}
-                              style={{ width: `${sitToStandState.sittingConfidence}%` }}
-                            />
-                          </div>
-                        </div>
-                        <div>
-                          <div className="flex justify-between text-sm mb-1">
-                            <span className="text-emerald-400">서있음</span>
-                            <span className="text-white font-bold">{Math.round(sitToStandState.standingConfidence)}%</span>
-                          </div>
-                          <div className="w-full bg-slate-700 rounded-full h-4">
-                            <div
-                              className={`h-4 rounded-full transition-all duration-300 ${
-                                sitToStandState.testPhase === 'complete' ? 'bg-emerald-400' : 'bg-emerald-500/50'
-                              }`}
-                              style={{ width: `${sitToStandState.standingConfidence}%` }}
-                            />
-                          </div>
-                        </div>
+                  {/* 손 상태 */}
+                  <div className={`flex-1 px-3 py-2 rounded-lg text-center ${
+                    sitToStandState.handSupport === HandSupportState.HEAVY_SUPPORT ? 'bg-red-500 animate-pulse' :
+                    sitToStandState.handPosition === HandPosition.HANDS_UP ? 'bg-emerald-500/80' :
+                    'bg-slate-700/80'
+                  }`}>
+                    <p className="text-white font-medium text-sm">
+                      {sitToStandState.handSupport === HandSupportState.HEAVY_SUPPORT && '⚠️ 손 사용!'}
+                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_UP && '✓ 손 OK'}
+                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_ON_KNEE && '손 무릎 위'}
+                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.UNKNOWN && '손 감지 중'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* 피드백 메시지 */}
+                <div className={`px-4 py-2 rounded-lg text-center ${
+                  sitToStandState.feedback.type === 'success' ? 'bg-emerald-500' :
+                  sitToStandState.feedback.type === 'error' ? 'bg-red-500' :
+                  sitToStandState.feedback.type === 'warning' ? 'bg-yellow-500' :
+                  'bg-blue-500'
+                }`}>
+                  <p className="text-white font-bold">{sitToStandState.feedback.message}</p>
+                </div>
+
+                {/* 신뢰도 바 */}
+                <div className="bg-slate-900/90 p-3 rounded-xl">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-yellow-400">앉음</span>
+                        <span className="text-white font-bold">{Math.round(sitToStandState.sittingConfidence)}%</span>
+                      </div>
+                      <div className="w-full bg-slate-700 rounded-full h-3">
+                        <div
+                          className={`h-3 rounded-full transition-all duration-300 ${
+                            sitToStandState.testPhase === 'sitting_confirmed' ? 'bg-yellow-400' : 'bg-yellow-500/50'
+                          }`}
+                          style={{ width: `${sitToStandState.sittingConfidence}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-emerald-400">서있음</span>
+                        <span className="text-white font-bold">{Math.round(sitToStandState.standingConfidence)}%</span>
+                      </div>
+                      <div className="w-full bg-slate-700 rounded-full h-3">
+                        <div
+                          className={`h-3 rounded-full transition-all duration-300 ${
+                            sitToStandState.testPhase === 'complete' ? 'bg-emerald-400' : 'bg-emerald-500/50'
+                          }`}
+                          style={{ width: `${sitToStandState.standingConfidence}%` }}
+                        />
                       </div>
                     </div>
                   </div>
-                </>
-              )}
-            </div>
+                </div>
+              </div>
+            )}
 
             {/* 단계별 안내 카드 */}
             {isAnalyzing && !sitToStandState.showResultModal && (
@@ -2119,160 +2139,135 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 카메라/동영상 뷰 */}
-            <div className={`aspect-[9/16] max-h-[70vh] bg-slate-800 rounded-2xl overflow-hidden relative mx-auto`}>
-              <video ref={videoRef} className="hidden" playsInline />
-              <canvas ref={canvasRef} className="w-full h-full object-contain" />
-
-              {/* 시작 전 */}
-              {!isAnalyzing && !cameraLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
-                  <div className="text-center space-y-4">
-                    <div className="w-24 h-24 mx-auto rounded-full bg-blue-500/20 flex items-center justify-center">
-                      <span className="text-5xl">🎬</span>
+            {/* 양쪽 동영상 뷰 (측면 + 정면 동시 표시) */}
+            <div className="grid grid-cols-2 gap-2">
+              {/* 측면 영상 */}
+              <div className="relative">
+                <div className="text-center text-slate-300 font-medium mb-1 text-sm">📐 측면</div>
+                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+                  <video ref={sideVideoRef} className="hidden" playsInline muted />
+                  <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
+                  {!sideVideoUrl && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-slate-500 text-sm">영상 없음</span>
                     </div>
-                    <p className="text-slate-300">
-                      동영상 분석을 시작합니다
+                  )}
+                </div>
+              </div>
+
+              {/* 정면 영상 */}
+              <div className="relative">
+                <div className="text-center text-slate-300 font-medium mb-1 text-sm">👤 정면</div>
+                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+                  <video ref={frontVideoRef} className="hidden" playsInline muted />
+                  <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
+                  {!frontVideoUrl && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-slate-500 text-sm">영상 없음</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* 시작 전 */}
+            {!isAnalyzing && !cameraLoading && (
+              <div className="mt-4 text-center">
+                <Button variant="bbs" size="lg" onClick={startItem}>
+                  검사 시작
+                </Button>
+              </div>
+            )}
+
+            {/* 로딩 중 */}
+            {cameraLoading && (
+              <div className="mt-4 text-center">
+                <div className="w-12 h-12 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <p className="text-slate-300 mt-2">동영상 분석 준비 중...</p>
+              </div>
+            )}
+
+            {/* 동영상 재생 컨트롤 (분석 중일 때) */}
+            {isAnalyzing && !cameraLoading && (
+              <div className="mt-3 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={toggleVideoPause}
+                    className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
+                  >
+                    {(isSideVideoPaused || isFrontVideoPaused) ? (
+                      <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                      </svg>
+                    )}
+                  </button>
+                  <div className="flex-1">
+                    <input
+                      type="range"
+                      min="0"
+                      max={Math.max(sideVideoDuration, frontVideoDuration) || 100}
+                      value={Math.max(sideVideoProgress, frontVideoProgress)}
+                      onChange={(e) => seekVideo(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                  <div className="text-white text-sm font-mono min-w-[80px] text-right">
+                    {Math.floor(Math.max(sideVideoProgress, frontVideoProgress) / 60)}:{String(Math.floor(Math.max(sideVideoProgress, frontVideoProgress) % 60)).padStart(2, '0')} / {Math.floor(Math.max(sideVideoDuration, frontVideoDuration) / 60)}:{String(Math.floor(Math.max(sideVideoDuration, frontVideoDuration) % 60)).padStart(2, '0')}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 분석 상태 표시 */}
+            {isAnalyzing && !cameraLoading && (
+              <div className="mt-3 space-y-2">
+                {/* 타이머 & 피드백 */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="bg-slate-900/90 px-4 py-2 rounded-lg">
+                    <p className="text-slate-400 text-xs">경과 시간</p>
+                    <p className="text-white font-mono text-2xl font-bold">
+                      {Math.floor(standingState.standingDuration / 60)}:{String(Math.floor(standingState.standingDuration % 60)).padStart(2, '0')}
                     </p>
-                    <Button variant="bbs" size="lg" onClick={startItem}>
-                      검사 시작
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              {/* 로딩 중 */}
-              {cameraLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
-                  <div className="text-center space-y-4">
-                    <div className="w-16 h-16 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                    <p className="text-slate-300">
-                      동영상 분석 준비 중...
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* 뷰 전환 버튼 (상단 우측) */}
-              {isAnalyzing && !cameraLoading && (
-                <div className="absolute top-4 right-4 z-40">
-                  <div className="flex bg-slate-900/90 backdrop-blur-sm rounded-lg overflow-hidden">
-                    <button
-                      onClick={() => switchVideoView('side')}
-                      className={`px-3 py-2 text-sm font-medium transition-colors ${
-                        activeVideoView === 'side'
-                          ? 'bg-blue-500 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      📐 측면
-                    </button>
-                    <button
-                      onClick={() => switchVideoView('front')}
-                      className={`px-3 py-2 text-sm font-medium transition-colors ${
-                        activeVideoView === 'front'
-                          ? 'bg-blue-500 text-white'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      👤 정면
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* 동영상 재생 컨트롤 (분석 중일 때) - 아이템2용은 상단에 배치 */}
-              {isAnalyzing && !cameraLoading && (
-                <div className="absolute top-16 left-4 right-4 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3 z-30">
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={toggleVideoPause}
-                      className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
-                    >
-                      {isVideoPaused ? (
-                        <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
-                      ) : (
-                        <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                        </svg>
-                      )}
-                    </button>
-                    <div className="flex-1">
-                      <input
-                        type="range"
-                        min="0"
-                        max={videoDuration || 100}
-                        value={videoProgress}
-                        onChange={(e) => seekVideo(parseFloat(e.target.value))}
-                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                      />
-                    </div>
-                    <div className="text-white text-sm font-mono min-w-[80px] text-right">
-                      {Math.floor(videoProgress / 60)}:{String(Math.floor(videoProgress % 60)).padStart(2, '0')} / {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, '0')}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 분석 중 오버레이 */}
-              {isAnalyzing && !cameraLoading && (
-                <>
-                  {/* 상단 좌측: 타이머 - 위치 조정 */}
-                  <div className="absolute top-32 left-4">
-                    <div className="bg-slate-900/90 backdrop-blur-sm px-6 py-4 rounded-xl shadow-lg">
-                      <p className="text-slate-400 text-sm mb-1">경과 시간</p>
-                      <p className="text-white font-mono text-4xl font-bold">
-                        {Math.floor(standingState.standingDuration / 60)}:{String(Math.floor(standingState.standingDuration % 60)).padStart(2, '0')}
-                      </p>
-                      <p className="text-slate-500 text-xs mt-1">목표: 2:00</p>
-                    </div>
                   </div>
 
-                  {/* 상단 우측: 피드백 메시지 */}
-                  <div className={`absolute top-4 right-4 px-4 py-3 rounded-xl backdrop-blur-sm shadow-lg max-w-[250px] ${
+                  <div className={`flex-1 px-4 py-2 rounded-lg text-center ${
                     standingState.feedback.type === 'success' ? 'bg-emerald-500' :
                     standingState.feedback.type === 'error' ? 'bg-red-500' :
                     standingState.feedback.type === 'warning' ? 'bg-yellow-500' :
                     'bg-blue-500'
                   }`}>
-                    <p className="text-white font-bold text-lg">{standingState.feedback.message}</p>
+                    <p className="text-white font-bold">{standingState.feedback.message}</p>
                   </div>
+                </div>
 
-                  {/* 하단: 진행률 바 */}
-                  <div className="absolute bottom-4 left-4 right-4">
-                    <div className="bg-slate-900/90 backdrop-blur-sm p-4 rounded-xl">
-                      <div className="flex justify-between text-sm mb-2">
-                        <span className="text-slate-400">진행률</span>
-                        <span className="text-white font-bold">{Math.round(progressPercent)}%</span>
-                      </div>
-                      <div className="w-full bg-slate-700 rounded-full h-6 overflow-hidden">
-                        <div
-                          className={`h-6 rounded-full transition-all duration-300 flex items-center justify-end pr-2 ${
-                            progressPercent >= 100 ? 'bg-emerald-500' :
-                            progressPercent >= 50 ? 'bg-blue-500' :
-                            'bg-blue-400'
-                          }`}
-                          style={{ width: `${progressPercent}%` }}
-                        >
-                          {progressPercent >= 15 && (
-                            <span className="text-white text-xs font-bold">
-                              {Math.floor(standingState.standingDuration)}초
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex justify-between text-xs text-slate-500 mt-1">
-                        <span>0초</span>
-                        <span className="text-yellow-400">30초 (최소)</span>
-                        <span>2분</span>
-                      </div>
-                    </div>
+                {/* 진행률 바 */}
+                <div className="bg-slate-900/90 p-3 rounded-xl">
+                  <div className="flex justify-between text-sm mb-2">
+                    <span className="text-slate-400">진행률</span>
+                    <span className="text-white font-bold">{Math.round(progressPercent)}%</span>
                   </div>
-                </>
-              )}
-            </div>
+                  <div className="w-full bg-slate-700 rounded-full h-4 overflow-hidden">
+                    <div
+                      className={`h-4 rounded-full transition-all duration-300 ${
+                        progressPercent >= 100 ? 'bg-emerald-500' :
+                        progressPercent >= 50 ? 'bg-blue-500' :
+                        'bg-blue-400'
+                      }`}
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-xs text-slate-500 mt-1">
+                    <span>0초</span>
+                    <span className="text-yellow-400">30초</span>
+                    <span>2분</span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* 단계별 안내 카드 */}
             {isAnalyzing && !standingState.showResultModal && (
@@ -2590,129 +2585,121 @@ function BBSTestPage() {
             </div>
           </Card>
 
-          <div className={`aspect-[9/16] max-h-[70vh] bg-slate-800 rounded-2xl overflow-hidden relative mx-auto`}>
-            <video ref={videoRef} className="hidden" playsInline />
-            <canvas ref={canvasRef} className="w-full h-full object-contain" />
-
-            {/* 시작 전 */}
-            {!isAnalyzing && !cameraLoading && (
-              <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
-                <div className="text-center space-y-4">
-                  <div className="w-20 h-20 mx-auto rounded-full bg-blue-500/20 flex items-center justify-center">
-                    <span className="text-4xl">🎬</span>
+          {/* 양쪽 동영상 뷰 (측면 + 정면 동시 표시) */}
+          <div className="grid grid-cols-2 gap-2">
+            {/* 측면 영상 */}
+            <div className="relative">
+              <div className="text-center text-slate-300 font-medium mb-1 text-sm">📐 측면</div>
+              <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+                <video ref={sideVideoRef} className="hidden" playsInline muted />
+                <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
+                {!sideVideoUrl && (
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <span className="text-slate-500 text-sm">영상 없음</span>
                   </div>
-                  <Button variant="bbs" size="lg" onClick={startItem}>항목 시작</Button>
-                </div>
+                )}
               </div>
-            )}
+            </div>
 
-            {/* 로딩 중 */}
-            {cameraLoading && (
-              <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
-                <div className="text-center space-y-4">
-                  <div className="w-16 h-16 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-slate-300">
-                    동영상 분석 준비 중...
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* 뷰 전환 버튼 (상단) */}
-            {isAnalyzing && !cameraLoading && (
-              <div className="absolute top-4 right-4 z-40">
-                <div className="flex bg-slate-900/90 backdrop-blur-sm rounded-lg overflow-hidden">
-                  <button
-                    onClick={() => switchVideoView('side')}
-                    className={`px-3 py-2 text-sm font-medium transition-colors ${
-                      activeVideoView === 'side'
-                        ? 'bg-blue-500 text-white'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    📐 측면
-                  </button>
-                  <button
-                    onClick={() => switchVideoView('front')}
-                    className={`px-3 py-2 text-sm font-medium transition-colors ${
-                      activeVideoView === 'front'
-                        ? 'bg-blue-500 text-white'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    👤 정면
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {isAnalyzing && (
-              <>
-                {/* 동영상 재생 컨트롤 */}
-                <div className="absolute top-20 left-4 right-4 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3 z-30">
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={toggleVideoPause}
-                        className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
-                      >
-                        {isVideoPaused ? (
-                          <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M8 5v14l11-7z" />
-                          </svg>
-                        ) : (
-                          <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                          </svg>
-                        )}
-                      </button>
-                      <div className="flex-1">
-                        <input
-                          type="range"
-                          min="0"
-                          max={videoDuration || 100}
-                          value={videoProgress}
-                          onChange={(e) => seekVideo(parseFloat(e.target.value))}
-                          className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                        />
-                      </div>
-                      <div className="text-white text-sm font-mono min-w-[80px] text-right">
-                        {Math.floor(videoProgress / 60)}:{String(Math.floor(videoProgress % 60)).padStart(2, '0')} / {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, '0')}
-                      </div>
-                    </div>
+            {/* 정면 영상 */}
+            <div className="relative">
+              <div className="text-center text-slate-300 font-medium mb-1 text-sm">👤 정면</div>
+              <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+                <video ref={frontVideoRef} className="hidden" playsInline muted />
+                <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
+                {!frontVideoUrl && (
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <span className="text-slate-500 text-sm">영상 없음</span>
                   </div>
+                )}
+              </div>
+            </div>
+          </div>
 
+          {/* 시작 전 */}
+          {!isAnalyzing && !cameraLoading && (
+            <div className="mt-4 text-center">
+              <Button variant="bbs" size="lg" onClick={startItem}>항목 시작</Button>
+            </div>
+          )}
+
+          {/* 로딩 중 */}
+          {cameraLoading && (
+            <div className="mt-4 text-center">
+              <div className="w-12 h-12 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+              <p className="text-slate-300 mt-2">동영상 분석 준비 중...</p>
+            </div>
+          )}
+
+          {/* 동영상 재생 컨트롤 & 분석 상태 (분석 중일 때) */}
+          {isAnalyzing && !cameraLoading && (
+            <div className="mt-3 space-y-2">
+              {/* 재생 컨트롤 */}
+              <div className="bg-slate-900/80 backdrop-blur-sm rounded-xl p-3">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={toggleVideoPause}
+                    className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
+                  >
+                    {(isSideVideoPaused || isFrontVideoPaused) ? (
+                      <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                      </svg>
+                    )}
+                  </button>
+                  <div className="flex-1">
+                    <input
+                      type="range"
+                      min="0"
+                      max={Math.max(sideVideoDuration, frontVideoDuration) || 100}
+                      value={Math.max(sideVideoProgress, frontVideoProgress)}
+                      onChange={(e) => seekVideo(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                  <div className="text-white text-sm font-mono min-w-[80px] text-right">
+                    {Math.floor(Math.max(sideVideoProgress, frontVideoProgress) / 60)}:{String(Math.floor(Math.max(sideVideoProgress, frontVideoProgress) % 60)).padStart(2, '0')} / {Math.floor(Math.max(sideVideoDuration, frontVideoDuration) / 60)}:{String(Math.floor(Math.max(sideVideoDuration, frontVideoDuration) % 60)).padStart(2, '0')}
+                  </div>
+                </div>
+              </div>
+
+              {/* 타이머 & 상태 */}
+              <div className="flex items-center justify-between gap-2">
                 {currentBBSItem.duration > 0 && (
-                  <div className="absolute top-4 left-4 bg-slate-900/80 px-4 py-2 rounded-full">
-                    <span className="text-white font-mono text-xl">
+                  <div className="bg-slate-900/80 px-4 py-2 rounded-lg">
+                    <span className="text-white font-mono text-lg">
                       {itemTimer.toFixed(1)}초 / {currentBBSItem.duration}초
                     </span>
                   </div>
                 )}
 
-                <div className="absolute top-16 right-4 bg-slate-900/80 px-4 py-2 rounded-xl text-right">
+                <div className="flex-1 bg-slate-900/80 px-4 py-2 rounded-lg text-right">
                   <p className="text-blue-400 font-medium">{generalDetection.status}</p>
                   {generalDetection.message && (
                     <p className="text-slate-400 text-xs">{generalDetection.message}</p>
                   )}
                 </div>
+              </div>
 
-                <div className="absolute bottom-4 left-4 right-4">
-                  <div className="bg-slate-900/80 p-3 rounded-xl">
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-slate-400">감지 신뢰도</span>
-                      <span className="text-blue-400">{Math.round(generalDetection.confidence)}%</span>
-                    </div>
-                    <div className="w-full bg-slate-700 rounded-full h-2">
-                      <div
-                        className="bg-gradient-to-r from-blue-500 to-indigo-500 h-2 rounded-full transition-all"
-                        style={{ width: `${generalDetection.confidence}%` }}
-                      />
-                    </div>
-                  </div>
+              {/* 신뢰도 바 */}
+              <div className="bg-slate-900/80 p-3 rounded-xl">
+                <div className="flex justify-between text-sm mb-1">
+                  <span className="text-slate-400">감지 신뢰도</span>
+                  <span className="text-blue-400">{Math.round(generalDetection.confidence)}%</span>
                 </div>
-              </>
-            )}
-          </div>
+                <div className="w-full bg-slate-700 rounded-full h-2">
+                  <div
+                    className="bg-gradient-to-r from-blue-500 to-indigo-500 h-2 rounded-full transition-all"
+                    style={{ width: `${generalDetection.confidence}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           <Card padding="md">
             <h4 className="text-white font-semibold mb-3">점수 선택</h4>
