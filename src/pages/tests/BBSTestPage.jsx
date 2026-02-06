@@ -174,8 +174,11 @@ function BBSTestPage() {
   const [frontLandmarks, setFrontLandmarks] = useState(null);
 
   // AI 자동 감지된 영상 타입 ('side' | 'front' | 'unknown')
+  // ref로 관리하여 콜백 안에서 최신 값 접근 가능
   const [video1DetectedType, setVideo1DetectedType] = useState('unknown');
   const [video2DetectedType, setVideo2DetectedType] = useState('unknown');
+  const video1DetectedTypeRef = useRef('unknown');
+  const video2DetectedTypeRef = useRef('unknown');
   const detectionCountRef = useRef({ video1: { side: 0, front: 0 }, video2: { side: 0, front: 0 } });
 
   // 디버그용 상태 (ref 상태를 화면에 표시하기 위함)
@@ -854,9 +857,22 @@ function BBSTestPage() {
       minTrackingConfidence: 0.6
     });
 
+    // onResults 호출 카운터
+    let resultsCount = 0;
+
     pose.onResults((results) => {
+      resultsCount++;
+
+      // 처음 3번만 로그
+      if (resultsCount <= 3) {
+        console.log(`[${viewType}] onResults #${resultsCount}: hasLandmarks=${!!results.poseLandmarks}, landmarkCount=${results.poseLandmarks?.length || 0}`);
+      }
+
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      if (!canvas) {
+        console.log(`[${viewType}] Canvas not found!`);
+        return;
+      }
 
       const ctx = canvas.getContext('2d');
       canvas.width = video.videoWidth || 640;
@@ -873,8 +889,14 @@ function BBSTestPage() {
         const detectedView = detectViewType(results.poseLandmarks);
         const videoKey = viewType === 'side' ? 'video1' : 'video2';
 
+        // 디버그 로그 (처음 몇 프레임만)
+        const totalCount = detectionCountRef.current[videoKey].side + detectionCountRef.current[videoKey].front;
+        if (totalCount < 5) {
+          console.log(`[DEBUG ${videoKey}] 프레임 ${totalCount + 1}: detectedView=${detectedView}, viewType=${viewType}`);
+        }
+
         // 감지 결과 누적 (처음 30프레임 동안)
-        if (detectionCountRef.current[videoKey].side + detectionCountRef.current[videoKey].front < 30) {
+        if (totalCount < 30) {
           if (detectedView === 'side') {
             detectionCountRef.current[videoKey].side++;
           } else if (detectedView === 'front') {
@@ -886,49 +908,52 @@ function BBSTestPage() {
           if (counts.side + counts.front >= 30) {
             const finalType = counts.side > counts.front ? 'side' : 'front';
             if (videoKey === 'video1') {
+              video1DetectedTypeRef.current = finalType; // ref 먼저 업데이트
               setVideo1DetectedType(finalType);
               console.log(`[AI 감지] 영상1: ${finalType === 'side' ? '측면' : '정면'} (측면:${counts.side}, 정면:${counts.front})`);
             } else {
+              video2DetectedTypeRef.current = finalType; // ref 먼저 업데이트
               setVideo2DetectedType(finalType);
               console.log(`[AI 감지] 영상2: ${finalType === 'side' ? '측면' : '정면'} (측면:${counts.side}, 정면:${counts.front})`);
             }
           }
         }
 
-        // 실제 감지된 타입으로 분석 여부 결정
-        const actualViewType = videoKey === 'video1' ? video1DetectedType : video2DetectedType;
+        // 실제 감지된 타입으로 분석 여부 결정 (ref 사용으로 최신 값 접근)
+        const actualViewType = videoKey === 'video1' ? video1DetectedTypeRef.current : video2DetectedTypeRef.current;
         const isSideView = actualViewType === 'side' || (actualViewType === 'unknown' && detectedView === 'side');
+
+        // 30프레임 이후 첫 번째 분석 로그
+        if (totalCount === 30) {
+          console.log(`[DEBUG ${videoKey}] 감지 완료! actualViewType=${actualViewType}, isSideView=${isSideView}`);
+        }
 
         let skeletonColor = '#3B82F6';
 
-        // 측면 영상에서만 주요 분석 수행
-        if (isSideView) {
-          skeletonColor = '#10B981'; // 녹색 - 분석 중인 영상
-          if (isItem1) {
-            const analysis = handleItem1Analysis(results.poseLandmarks);
-            skeletonColor = analysis.state === PostureState.SITTING ? '#EAB308' :
-                           analysis.state === PostureState.STANDING ? '#10B981' : '#64748B';
-            drawAngleInfo(ctx, analysis, results.poseLandmarks, canvas.width, canvas.height);
-          } else if (isItem2) {
-            const analysis = handleItem2Analysis(results.poseLandmarks);
-            if (analysis && analysis.stability) {
-              skeletonColor = analysis.stability === 'excellent' ? '#10B981' :
-                             analysis.stability === 'good' ? '#22C55E' :
-                             analysis.stability === 'moderate' ? '#EAB308' :
-                             analysis.stability === 'poor' ? '#F97316' : '#EF4444';
-            }
-          } else {
-            handleGeneralAnalysis(results.poseLandmarks);
+        // 양쪽 영상 모두 분석 수행
+        if (isItem1) {
+          const analysis = handleItem1Analysis(results.poseLandmarks);
+          skeletonColor = analysis.state === PostureState.SITTING ? '#EAB308' :
+                         analysis.state === PostureState.STANDING ? '#10B981' : '#64748B';
+          drawAngleInfo(ctx, analysis, results.poseLandmarks, canvas.width, canvas.height);
+        } else if (isItem2) {
+          const analysis = handleItem2Analysis(results.poseLandmarks);
+          if (analysis && analysis.stability) {
+            skeletonColor = analysis.stability === 'excellent' ? '#10B981' :
+                           analysis.stability === 'good' ? '#22C55E' :
+                           analysis.stability === 'moderate' ? '#EAB308' :
+                           analysis.stability === 'poor' ? '#F97316' : '#EF4444';
           }
         } else {
-          // 정면 영상 - 보라색 스켈레톤 (보조)
-          skeletonColor = '#8B5CF6';
+          handleGeneralAnalysis(results.poseLandmarks);
+          skeletonColor = isSideView ? '#10B981' : '#8B5CF6';
         }
 
         // 감지된 타입 표시
+        const viewLabel = isSideView ? '📐 측면' : '👤 정면';
         ctx.fillStyle = isSideView ? '#10B981' : '#8B5CF6';
         ctx.font = 'bold 14px sans-serif';
-        ctx.fillText(isSideView ? '📐 측면 (분석용)' : '👤 정면 (보조)', 10, 25);
+        ctx.fillText(`${viewLabel} (분석 중)`, 10, 25);
 
         drawConnections(ctx, results.poseLandmarks, canvas.width, canvas.height, {
           strokeStyle: skeletonColor,
@@ -945,22 +970,32 @@ function BBSTestPage() {
 
     poseRef.current = pose;
 
+    // 프레임 카운터 (디버깅용)
+    let frameCount = 0;
+
     // 비디오 프레임 분석 루프
     const analyzeVideoFrame = async () => {
       if (!video || video.paused || video.ended) {
         if (video.ended) {
           setPaused(true);
+          console.log(`[${viewType}] Video ended at frame ${frameCount}`);
         }
         return;
       }
 
+      frameCount++;
       setProgress(video.currentTime);
+
+      // 처음 5프레임만 로그
+      if (frameCount <= 5) {
+        console.log(`[${viewType}] Frame ${frameCount}: readyState=${video.readyState}, currentTime=${video.currentTime.toFixed(2)}`);
+      }
 
       if (poseRef.current && video.readyState >= 2) {
         try {
           await poseRef.current.send({ image: video });
         } catch (e) {
-          console.log('Video frame analysis error:', e);
+          console.log(`[${viewType}] Frame analysis error:`, e);
         }
       }
 
@@ -981,7 +1016,7 @@ function BBSTestPage() {
 
     console.log(`[${viewType}] Analysis started`);
     return true;
-  }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis, detectViewType, video1DetectedType, video2DetectedType]);
+  }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis, detectViewType]);
 
   // 양쪽 동영상 병렬 분석 초기화
   const initVideoAnalysis = useCallback(async () => {
@@ -1013,8 +1048,10 @@ function BBSTestPage() {
         frontAnalysisRef.current = null;
       }
 
-      // AI 감지 카운터 리셋
+      // AI 감지 카운터 및 타입 리셋
       detectionCountRef.current = { video1: { side: 0, front: 0 }, video2: { side: 0, front: 0 } };
+      video1DetectedTypeRef.current = 'unknown';
+      video2DetectedTypeRef.current = 'unknown';
       setVideo1DetectedType('unknown');
       setVideo2DetectedType('unknown');
 
