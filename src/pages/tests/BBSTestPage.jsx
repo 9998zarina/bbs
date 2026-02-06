@@ -738,21 +738,37 @@ function BBSTestPage() {
     videoRef, canvasRef, poseRef, analysisRef,
     videoUrl, setProgress, setDuration, setPaused, setLandmarks, viewType
   ) => {
+    console.log(`[${viewType}] initSingleVideoAnalysis called`);
+    console.log(`[${viewType}] videoRef.current:`, videoRef.current);
+    console.log(`[${viewType}] canvasRef.current:`, canvasRef.current);
+    console.log(`[${viewType}] videoUrl:`, videoUrl);
+
     if (!videoRef.current || !canvasRef.current || !videoUrl) {
+      console.log(`[${viewType}] Missing required refs or URL, returning null`);
       return null;
     }
 
     const video = videoRef.current;
     video.src = videoUrl;
     video.muted = true;
+    video.playsInline = true;
+
+    console.log(`[${viewType}] Loading video...`);
 
     // 비디오 로드 대기
     await new Promise((resolve, reject) => {
-      video.onloadeddata = resolve;
-      video.onerror = reject;
+      video.onloadeddata = () => {
+        console.log(`[${viewType}] Video loaded successfully`);
+        resolve();
+      };
+      video.onerror = (e) => {
+        console.error(`[${viewType}] Video load error:`, e);
+        reject(e);
+      };
       video.load();
     });
 
+    console.log(`[${viewType}] Video duration:`, video.duration);
     setDuration(video.duration);
 
     const { Pose } = await import('@mediapipe/pose');
@@ -847,14 +863,22 @@ function BBSTestPage() {
     };
 
     // 비디오 재생 시작
-    await video.play();
+    console.log(`[${viewType}] Starting video playback...`);
+    try {
+      await video.play();
+      console.log(`[${viewType}] Video playing successfully`);
+    } catch (playError) {
+      console.error(`[${viewType}] Video play error:`, playError);
+      // 자동 재생이 차단된 경우에도 계속 진행
+    }
     setPaused(false);
     analyzeVideoFrame();
 
+    console.log(`[${viewType}] Analysis started`);
     return true;
   }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
 
-  // 양쪽 동영상 동시 분석 초기화
+  // 양쪽 동영상 순차 분석 초기화
   const initVideoAnalysis = useCallback(async () => {
     setCameraLoading(true);
 
@@ -869,17 +893,39 @@ function BBSTestPage() {
         frontAnalysisRef.current = null;
       }
 
-      // 양쪽 영상 동시 초기화
-      const [sideResult, frontResult] = await Promise.all([
-        sideVideoUrl ? initSingleVideoAnalysis(
-          sideVideoRef, sideCanvasRef, sidePoseRef, sideAnalysisRef,
-          sideVideoUrl, setSideVideoProgress, setSideVideoDuration, setIsSideVideoPaused, setSideLandmarks, 'side'
-        ) : null,
-        frontVideoUrl ? initSingleVideoAnalysis(
-          frontVideoRef, frontCanvasRef, frontPoseRef, frontAnalysisRef,
-          frontVideoUrl, setFrontVideoProgress, setFrontVideoDuration, setIsFrontVideoPaused, setFrontLandmarks, 'front'
-        ) : null
-      ]);
+      // 측면 영상 초기화 (먼저)
+      let sideResult = null;
+      if (sideVideoUrl && sideVideoRef.current) {
+        console.log('Starting side video analysis...', sideVideoUrl);
+        try {
+          sideResult = await initSingleVideoAnalysis(
+            sideVideoRef, sideCanvasRef, sidePoseRef, sideAnalysisRef,
+            sideVideoUrl, setSideVideoProgress, setSideVideoDuration, setIsSideVideoPaused, setSideLandmarks, 'side'
+          );
+          console.log('Side video analysis result:', sideResult);
+        } catch (e) {
+          console.error('Side video init error:', e);
+        }
+      } else {
+        console.log('Side video skipped - URL:', sideVideoUrl, 'Ref:', sideVideoRef.current);
+      }
+
+      // 정면 영상 초기화 (그 다음)
+      let frontResult = null;
+      if (frontVideoUrl && frontVideoRef.current) {
+        console.log('Starting front video analysis...', frontVideoUrl);
+        try {
+          frontResult = await initSingleVideoAnalysis(
+            frontVideoRef, frontCanvasRef, frontPoseRef, frontAnalysisRef,
+            frontVideoUrl, setFrontVideoProgress, setFrontVideoDuration, setIsFrontVideoPaused, setFrontLandmarks, 'front'
+          );
+          console.log('Front video analysis result:', frontResult);
+        } catch (e) {
+          console.error('Front video init error:', e);
+        }
+      } else {
+        console.log('Front video skipped - URL:', frontVideoUrl, 'Ref:', frontVideoRef.current);
+      }
 
       setCameraLoading(false);
       return sideResult || frontResult;
@@ -964,6 +1010,13 @@ function BBSTestPage() {
 
   // 항목 시작
   const startItem = async () => {
+    console.log('=== startItem called ===');
+    console.log('sideVideoUrl at startItem:', sideVideoUrl);
+    console.log('frontVideoUrl at startItem:', frontVideoUrl);
+    console.log('sideVideoRef.current at startItem:', sideVideoRef.current);
+    console.log('frontVideoRef.current at startItem:', frontVideoRef.current);
+    console.log('isItem1:', isItem1, 'isItem2:', isItem2);
+
     setIsAnalyzing(true);
     setItemTimer(0);
     startTimeRef.current = Date.now();
@@ -1036,8 +1089,8 @@ function BBSTestPage() {
       setItemTimer(elapsed);
     }, 100);
 
-    // 동영상 분석 시작 (양쪽 동시)
-    await initVideoAnalysis();
+    // 동영상 분석은 useEffect에서 자동으로 시작됨 (isAnalyzing = true가 되면)
+    console.log('=== startItem complete, video analysis will start via useEffect ===');
   };
 
   // 양쪽 동영상 분석 정리 헬퍼
@@ -1313,6 +1366,21 @@ function BBSTestPage() {
       }
     };
   }, [sideVideoUrl, frontVideoUrl]);
+
+  // 분석 시작 시 비디오 초기화 (useEffect로 refs가 연결된 후 실행)
+  const videoInitTriggeredRef = useRef(false);
+  useEffect(() => {
+    if (isAnalyzing && !videoInitTriggeredRef.current && (sideVideoUrl || frontVideoUrl)) {
+      videoInitTriggeredRef.current = true;
+      console.log('=== useEffect: Starting video analysis ===');
+      console.log('sideVideoRef.current in useEffect:', sideVideoRef.current);
+      console.log('frontVideoRef.current in useEffect:', frontVideoRef.current);
+      initVideoAnalysis();
+    }
+    if (!isAnalyzing) {
+      videoInitTriggeredRef.current = false;
+    }
+  }, [isAnalyzing, sideVideoUrl, frontVideoUrl, initVideoAnalysis]);
 
   // 음성 안내 - 단계 변화 시
   const lastSpokenPhaseRef = useRef(null);
