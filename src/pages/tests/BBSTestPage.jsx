@@ -824,6 +824,138 @@ function BBSTestPage() {
     setCurrentLandmarks(null);
   };
 
+  // 이전 항목으로 이동
+  const goToPreviousItem = () => {
+    if (currentItem <= 0) return;
+
+    // 현재 분석 중지
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (cameraRef.current) {
+      cameraRef.current.stop();
+      cameraRef.current = null;
+    }
+
+    // 음성 중단
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    setIsAnalyzing(false);
+    setItemTimer(0);
+    setCurrentLandmarks(null);
+
+    // 항목 1, 2 상태 초기화
+    resetStateHistory();
+    resetStandingAnalysis();
+
+    setSitToStandState({
+      testPhase: 'waiting',
+      currentPosture: PostureState.UNKNOWN,
+      handPosition: HandPosition.UNKNOWN,
+      handSupport: HandSupportState.UNKNOWN,
+      sittingConfidence: 0,
+      standingConfidence: 0,
+      kneeAngle: 0,
+      hipAngle: 0,
+      feedback: { message: '의자에 앉아주세요...', type: 'info' },
+      sittingConfirmedAt: null,
+      standingDetectedAt: null,
+      usedHandsDuringTransition: false,
+      handUsageDetectedAt: null,
+      autoScore: null,
+      assessmentReport: null,
+      showResultModal: false,
+      debug: null
+    });
+
+    setStandingState({
+      testPhase: 'waiting',
+      currentState: 'not_standing',
+      stabilityLevel: 'good',
+      isStanding: false,
+      isUsingSupport: false,
+      standingStartTime: null,
+      standingDuration: 0,
+      targetDuration: 120,
+      supportSeekingCount: 0,
+      unstableTime: 0,
+      lostBalance: false,
+      feedback: { message: '지지물 없이 서 주세요...', type: 'info' },
+      autoScore: null,
+      assessmentReport: null,
+      showResultModal: false,
+      debug: null
+    });
+
+    setCurrentItem(currentItem - 1);
+  };
+
+  // 다음 항목으로 이동 (점수 없이 건너뛰기)
+  const goToNextItem = () => {
+    if (currentItem >= 13) return;
+
+    // 현재 분석 중지
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (cameraRef.current) {
+      cameraRef.current.stop();
+      cameraRef.current = null;
+    }
+
+    // 음성 중단
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    setIsAnalyzing(false);
+    setItemTimer(0);
+    setCurrentLandmarks(null);
+
+    // 항목 1, 2 상태 초기화
+    resetStateHistory();
+    resetStandingAnalysis();
+
+    setSitToStandState({
+      testPhase: 'waiting',
+      currentPosture: PostureState.UNKNOWN,
+      handPosition: HandPosition.UNKNOWN,
+      handSupport: HandSupportState.UNKNOWN,
+      sittingConfidence: 0,
+      standingConfidence: 0,
+      kneeAngle: 0,
+      hipAngle: 0,
+      feedback: { message: '의자에 앉아주세요...', type: 'info' },
+      sittingConfirmedAt: null,
+      standingDetectedAt: null,
+      usedHandsDuringTransition: false,
+      handUsageDetectedAt: null,
+      autoScore: null,
+      assessmentReport: null,
+      showResultModal: false,
+      debug: null
+    });
+
+    setStandingState({
+      testPhase: 'waiting',
+      currentState: 'not_standing',
+      stabilityLevel: 'good',
+      isStanding: false,
+      isUsingSupport: false,
+      standingStartTime: null,
+      standingDuration: 0,
+      targetDuration: 120,
+      supportSeekingCount: 0,
+      unstableTime: 0,
+      lostBalance: false,
+      feedback: { message: '지지물 없이 서 주세요...', type: 'info' },
+      autoScore: null,
+      assessmentReport: null,
+      showResultModal: false,
+      debug: null
+    });
+
+    setCurrentItem(currentItem + 1);
+  };
+
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
@@ -1184,6 +1316,26 @@ function BBSTestPage() {
               )}
             </div>
 
+            {/* 네비게이션 버튼 */}
+            {!isAnalyzing && !sitToStandState.showResultModal && (
+              <div className="flex gap-3">
+                <Button
+                  variant="ghost"
+                  className="flex-1"
+                  disabled={true}
+                >
+                  ← 이전
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={goToNextItem}
+                >
+                  건너뛰기 →
+                </Button>
+              </div>
+            )}
+
             {/* 단계별 안내 카드 */}
             {isAnalyzing && !sitToStandState.showResultModal && (
               <Card padding="md" className={`border-2 ${
@@ -1332,7 +1484,7 @@ function BBSTestPage() {
               </div>
 
               {/* 버튼 */}
-              <div className="p-6 bg-slate-800/50">
+              <div className="p-6 bg-slate-800/50 space-y-3">
                 <Button
                   variant="bbs"
                   size="lg"
@@ -1340,6 +1492,17 @@ function BBSTestPage() {
                   onClick={() => handleScore(sitToStandState.assessmentReport.scoring.autoScore)}
                 >
                   다음 항목으로 (항목 2) →
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="md"
+                  fullWidth
+                  onClick={() => {
+                    setSitToStandState(prev => ({ ...prev, showResultModal: false }));
+                    setIsAnalyzing(false);
+                  }}
+                >
+                  다시 검사하기
                 </Button>
               </div>
             </div>
@@ -1414,6 +1577,26 @@ function BBSTestPage() {
                 </ol>
               </div>
             </Card>
+
+            {/* 네비게이션 버튼 */}
+            {!isAnalyzing && !standingState.showResultModal && (
+              <div className="flex gap-3">
+                <Button
+                  variant="ghost"
+                  className="flex-1"
+                  onClick={goToPreviousItem}
+                >
+                  ← 이전
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={goToNextItem}
+                >
+                  건너뛰기 →
+                </Button>
+              </div>
+            )}
 
             {/* 카메라 뷰 */}
             <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden relative">
@@ -1704,7 +1887,7 @@ function BBSTestPage() {
               </div>
 
               {/* 버튼 */}
-              <div className="p-6 bg-slate-800/50">
+              <div className="p-6 bg-slate-800/50 space-y-3">
                 <Button
                   variant="bbs"
                   size="lg"
@@ -1713,6 +1896,30 @@ function BBSTestPage() {
                 >
                   다음 항목으로 (항목 3) →
                 </Button>
+                <div className="flex gap-3">
+                  <Button
+                    variant="ghost"
+                    size="md"
+                    className="flex-1"
+                    onClick={() => {
+                      setStandingState(prev => ({ ...prev, showResultModal: false }));
+                      setIsAnalyzing(false);
+                    }}
+                  >
+                    다시 검사하기
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="md"
+                    className="flex-1"
+                    onClick={() => {
+                      setStandingState(prev => ({ ...prev, showResultModal: false }));
+                      goToPreviousItem();
+                    }}
+                  >
+                    ← 이전 항목
+                  </Button>
+                </div>
               </div>
             </div>
           </div>
@@ -1834,24 +2041,24 @@ function BBSTestPage() {
             </div>
           </Card>
 
-          <div className="flex gap-4">
-            {currentItem > 0 && (
-              <Button
-                variant="ghost"
-                className="flex-1"
-                onClick={() => {
-                  if (timerRef.current) clearInterval(timerRef.current);
-                  if (cameraRef.current) {
-                    cameraRef.current.stop();
-                    cameraRef.current = null;
-                  }
-                  setIsAnalyzing(false);
-                  setCurrentItem(currentItem - 1);
-                }}
-              >
-                이전 항목
-              </Button>
-            )}
+          {/* 네비게이션 버튼 */}
+          <div className="flex gap-3">
+            <Button
+              variant="ghost"
+              className="flex-1"
+              onClick={goToPreviousItem}
+              disabled={currentItem === 0}
+            >
+              ← 이전
+            </Button>
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={goToNextItem}
+              disabled={currentItem >= 13}
+            >
+              건너뛰기 →
+            </Button>
           </div>
         </div>
       </main>
