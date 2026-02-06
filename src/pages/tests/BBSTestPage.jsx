@@ -26,28 +26,11 @@ import { useNavigation, PAGES } from '../../context/NavigationContext';
 import { useTestHistory } from '../../context/TestHistoryContext';
 
 /**
- * 음성 안내 함수
+ * 음성 안내 함수 (비활성화됨)
  */
 const speak = (text, rate = 1.0) => {
-  if ('speechSynthesis' in window) {
-    // 이전 음성 중단
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'ko-KR';
-    utterance.rate = rate;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-
-    // 한국어 음성 찾기
-    const voices = window.speechSynthesis.getVoices();
-    const koreanVoice = voices.find(voice => voice.lang.includes('ko'));
-    if (koreanVoice) {
-      utterance.voice = koreanVoice;
-    }
-
-    window.speechSynthesis.speak(utterance);
-  }
+  // 음성 안내 비활성화
+  return;
 };
 
 /**
@@ -1688,8 +1671,8 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={sideVideoRef} className="hidden" playsInline muted />
-                  <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
+                  <video ref={sideVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                   {!sideVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
@@ -1734,8 +1717,8 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={frontVideoRef} className="hidden" playsInline muted />
-                  <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
+                  <video ref={frontVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                   {!frontVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
@@ -2181,8 +2164,8 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={sideVideoRef} className="hidden" playsInline muted />
-                  <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
+                  <video ref={sideVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                   {!sideVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
@@ -2227,8 +2210,8 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={frontVideoRef} className="hidden" playsInline muted />
-                  <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
+                  <video ref={frontVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                   {!frontVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
@@ -2656,8 +2639,8 @@ function BBSTestPage() {
             <div className="space-y-2">
               <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
               <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                <video ref={sideVideoRef} className="hidden" playsInline muted />
-                <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
+                <video ref={sideVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                 {!sideVideoUrl && (
                   <div className="absolute inset-0 flex items-center justify-center">
                     <span className="text-slate-500 text-sm">영상 없음</span>
@@ -2702,8 +2685,8 @@ function BBSTestPage() {
             <div className="space-y-2">
               <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
               <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                <video ref={frontVideoRef} className="hidden" playsInline muted />
-                <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
+                <video ref={frontVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                 {!frontVideoUrl && (
                   <div className="absolute inset-0 flex items-center justify-center">
                     <span className="text-slate-500 text-sm">영상 없음</span>
