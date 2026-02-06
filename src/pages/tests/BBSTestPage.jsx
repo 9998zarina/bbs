@@ -173,6 +173,9 @@ function BBSTestPage() {
   const [sideLandmarks, setSideLandmarks] = useState(null);
   const [frontLandmarks, setFrontLandmarks] = useState(null);
 
+  // 디버그용 상태 (ref 상태를 화면에 표시하기 위함)
+  const [debugInfo, setDebugInfo] = useState({ sideRef: false, frontRef: false });
+
   const { navigateTo } = useNavigation();
   const { addTestResult } = useTestHistory();
 
@@ -1424,6 +1427,23 @@ function BBSTestPage() {
     }
   }, [isAnalyzing, sideVideoUrl, frontVideoUrl, initVideoAnalysis]);
 
+  // 디버그 정보 주기적 업데이트
+  useEffect(() => {
+    const updateDebug = () => {
+      setDebugInfo({
+        sideRef: !!sideVideoRef.current,
+        frontRef: !!frontVideoRef.current,
+        sideVideoReady: sideVideoRef.current?.readyState || 0,
+        frontVideoReady: frontVideoRef.current?.readyState || 0,
+        sideVideoSrc: !!sideVideoRef.current?.src,
+        frontVideoSrc: !!frontVideoRef.current?.src
+      });
+    };
+    updateDebug();
+    const interval = setInterval(updateDebug, 500);
+    return () => clearInterval(interval);
+  }, []);
+
   // 음성 안내 - 단계 변화 시
   const lastSpokenPhaseRef = useRef(null);
   const lastSpokenTimeRef = useRef(null);
@@ -1732,6 +1752,23 @@ function BBSTestPage() {
 
         <main className="max-w-4xl mx-auto px-4 py-8">
           <div className="space-y-4">
+            {/* 디버그 패널 - 개발 중에만 표시 */}
+            <div className="bg-slate-900 border border-red-500/50 rounded-lg p-3 text-xs font-mono">
+              <div className="text-red-400 font-bold mb-2">🔧 디버그 정보 (실시간)</div>
+              <div className="grid grid-cols-2 gap-2 text-slate-300">
+                <div>측면 URL: <span className={sideVideoUrl ? 'text-green-400' : 'text-red-400'}>{sideVideoUrl ? '✓ 있음' : '✗ 없음'}</span></div>
+                <div>정면 URL: <span className={frontVideoUrl ? 'text-green-400' : 'text-red-400'}>{frontVideoUrl ? '✓ 있음' : '✗ 없음'}</span></div>
+                <div>측면 Ref: <span className={debugInfo.sideRef ? 'text-green-400' : 'text-red-400'}>{debugInfo.sideRef ? '✓ 연결됨' : '✗ null'}</span></div>
+                <div>정면 Ref: <span className={debugInfo.frontRef ? 'text-green-400' : 'text-red-400'}>{debugInfo.frontRef ? '✓ 연결됨' : '✗ null'}</span></div>
+                <div>측면 ready: <span className="text-blue-400">{debugInfo.sideVideoReady}</span></div>
+                <div>정면 ready: <span className="text-blue-400">{debugInfo.frontVideoReady}</span></div>
+                <div>측면 src: <span className={debugInfo.sideVideoSrc ? 'text-green-400' : 'text-red-400'}>{debugInfo.sideVideoSrc ? '✓' : '✗'}</span></div>
+                <div>정면 src: <span className={debugInfo.frontVideoSrc ? 'text-green-400' : 'text-red-400'}>{debugInfo.frontVideoSrc ? '✓' : '✗'}</span></div>
+                <div>분석 중: <span className={isAnalyzing ? 'text-green-400' : 'text-yellow-400'}>{isAnalyzing ? '✓' : '✗'}</span></div>
+                <div>로딩: <span className={cameraLoading ? 'text-yellow-400' : 'text-slate-400'}>{cameraLoading ? '로딩 중...' : '완료'}</span></div>
+              </div>
+            </div>
+
             {/* 진행률 */}
             <ProgressBar progress={(1 / 14) * 100} color="blue" height="md" />
 
