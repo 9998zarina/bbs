@@ -173,6 +173,11 @@ function BBSTestPage() {
   const [sideLandmarks, setSideLandmarks] = useState(null);
   const [frontLandmarks, setFrontLandmarks] = useState(null);
 
+  // AI 자동 감지된 영상 타입 ('side' | 'front' | 'unknown')
+  const [video1DetectedType, setVideo1DetectedType] = useState('unknown');
+  const [video2DetectedType, setVideo2DetectedType] = useState('unknown');
+  const detectionCountRef = useRef({ video1: { side: 0, front: 0 }, video2: { side: 0, front: 0 } });
+
   // 디버그용 상태 (ref 상태를 화면에 표시하기 위함)
   const [debugInfo, setDebugInfo] = useState({ sideRef: false, frontRef: false });
 
@@ -704,6 +709,40 @@ function BBSTestPage() {
     }
   }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
 
+  /**
+   * AI 자동 감지: 랜드마크로 측면/정면 판단
+   * - 정면: 어깨/엉덩이 좌우 x좌표 차이가 큼 (좌우로 펼쳐짐)
+   * - 측면: 어깨/엉덩이 좌우 x좌표 차이가 작음 (겹쳐 보임)
+   */
+  const detectViewType = useCallback((landmarks) => {
+    if (!landmarks || landmarks.length < 25) return 'unknown';
+
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+    const leftHip = landmarks[23];
+    const rightHip = landmarks[24];
+
+    if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return 'unknown';
+
+    // 어깨 좌우 거리
+    const shoulderDiff = Math.abs(leftShoulder.x - rightShoulder.x);
+    // 엉덩이 좌우 거리
+    const hipDiff = Math.abs(leftHip.x - rightHip.x);
+
+    // 평균 좌우 거리
+    const avgHorizontalSpread = (shoulderDiff + hipDiff) / 2;
+
+    // 정면: 좌우 펼침이 큼 (0.15 이상)
+    // 측면: 좌우 펼침이 작음 (0.15 미만)
+    const threshold = 0.12;
+
+    if (avgHorizontalSpread > threshold) {
+      return 'front'; // 정면
+    } else {
+      return 'side'; // 측면
+    }
+  }, []);
+
   // 측면 동영상 업로드 핸들러
   const handleSideVideoUpload = useCallback((event) => {
     const file = event.target.files?.[0];
@@ -830,10 +869,41 @@ function BBSTestPage() {
       if (results.poseLandmarks) {
         setLandmarks(results.poseLandmarks);
 
+        // AI 자동 감지: 이 영상이 측면인지 정면인지 판단
+        const detectedView = detectViewType(results.poseLandmarks);
+        const videoKey = viewType === 'side' ? 'video1' : 'video2';
+
+        // 감지 결과 누적 (처음 30프레임 동안)
+        if (detectionCountRef.current[videoKey].side + detectionCountRef.current[videoKey].front < 30) {
+          if (detectedView === 'side') {
+            detectionCountRef.current[videoKey].side++;
+          } else if (detectedView === 'front') {
+            detectionCountRef.current[videoKey].front++;
+          }
+
+          // 30프레임 도달 시 최종 판정
+          const counts = detectionCountRef.current[videoKey];
+          if (counts.side + counts.front >= 30) {
+            const finalType = counts.side > counts.front ? 'side' : 'front';
+            if (videoKey === 'video1') {
+              setVideo1DetectedType(finalType);
+              console.log(`[AI 감지] 영상1: ${finalType === 'side' ? '측면' : '정면'} (측면:${counts.side}, 정면:${counts.front})`);
+            } else {
+              setVideo2DetectedType(finalType);
+              console.log(`[AI 감지] 영상2: ${finalType === 'side' ? '측면' : '정면'} (측면:${counts.side}, 정면:${counts.front})`);
+            }
+          }
+        }
+
+        // 실제 감지된 타입으로 분석 여부 결정
+        const actualViewType = videoKey === 'video1' ? video1DetectedType : video2DetectedType;
+        const isSideView = actualViewType === 'side' || (actualViewType === 'unknown' && detectedView === 'side');
+
         let skeletonColor = '#3B82F6';
 
-        // 측면 영상에서만 주요 분석 수행 (정면은 보조)
-        if (viewType === 'side') {
+        // 측면 영상에서만 주요 분석 수행
+        if (isSideView) {
+          skeletonColor = '#10B981'; // 녹색 - 분석 중인 영상
           if (isItem1) {
             const analysis = handleItem1Analysis(results.poseLandmarks);
             skeletonColor = analysis.state === PostureState.SITTING ? '#EAB308' :
@@ -851,9 +921,14 @@ function BBSTestPage() {
             handleGeneralAnalysis(results.poseLandmarks);
           }
         } else {
-          // 정면 영상 - 파란색 스켈레톤만 표시
-          skeletonColor = '#8B5CF6'; // 보라색으로 구분
+          // 정면 영상 - 보라색 스켈레톤 (보조)
+          skeletonColor = '#8B5CF6';
         }
+
+        // 감지된 타입 표시
+        ctx.fillStyle = isSideView ? '#10B981' : '#8B5CF6';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.fillText(isSideView ? '📐 측면 (분석용)' : '👤 정면 (보조)', 10, 25);
 
         drawConnections(ctx, results.poseLandmarks, canvas.width, canvas.height, {
           strokeStyle: skeletonColor,
@@ -906,7 +981,7 @@ function BBSTestPage() {
 
     console.log(`[${viewType}] Analysis started`);
     return true;
-  }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
+  }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis, detectViewType, video1DetectedType, video2DetectedType]);
 
   // 양쪽 동영상 병렬 분석 초기화
   const initVideoAnalysis = useCallback(async () => {
@@ -937,6 +1012,11 @@ function BBSTestPage() {
         cancelAnimationFrame(frontAnalysisRef.current);
         frontAnalysisRef.current = null;
       }
+
+      // AI 감지 카운터 리셋
+      detectionCountRef.current = { video1: { side: 0, front: 0 }, video2: { side: 0, front: 0 } };
+      setVideo1DetectedType('unknown');
+      setVideo2DetectedType('unknown');
 
       // 양쪽 영상 병렬 초기화
       const initPromises = [];
@@ -1396,6 +1476,7 @@ function BBSTestPage() {
     completeTest(newScores);
   };
 
+  // 컴포넌트 언마운트 시에만 정리 (URL은 업로드 핸들러에서 관리)
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
@@ -1407,19 +1488,12 @@ function BBSTestPage() {
       if (frontAnalysisRef.current) {
         cancelAnimationFrame(frontAnalysisRef.current);
       }
-      // 업로드된 비디오 URL 해제
-      if (sideVideoUrl) {
-        URL.revokeObjectURL(sideVideoUrl);
-      }
-      if (frontVideoUrl) {
-        URL.revokeObjectURL(frontVideoUrl);
-      }
       // 음성 중단
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
     };
-  }, [sideVideoUrl, frontVideoUrl]);
+  }, []); // 빈 배열 - 언마운트 시에만 실행
 
   // 분석 시작 시 비디오 초기화 (useEffect로 refs가 연결된 후 실행)
   const videoInitTriggeredRef = useRef(false);
@@ -1761,21 +1835,24 @@ function BBSTestPage() {
 
         <main className="max-w-4xl mx-auto px-4 py-8">
           <div className="space-y-4">
-            {/* 디버그 패널 - 개발 중에만 표시 */}
-            <div className="bg-slate-900 border border-red-500/50 rounded-lg p-3 text-xs font-mono">
-              <div className="text-red-400 font-bold mb-2">🔧 디버그 정보 (실시간)</div>
-              <div className="grid grid-cols-2 gap-2 text-slate-300">
-                <div>측면 URL: <span className={sideVideoUrl ? 'text-green-400' : 'text-red-400'}>{sideVideoUrl ? '✓ 있음' : '✗ 없음'}</span></div>
-                <div>정면 URL: <span className={frontVideoUrl ? 'text-green-400' : 'text-red-400'}>{frontVideoUrl ? '✓ 있음' : '✗ 없음'}</span></div>
-                <div>측면 Ref: <span className={debugInfo.sideRef ? 'text-green-400' : 'text-red-400'}>{debugInfo.sideRef ? '✓ 연결됨' : '✗ null'}</span></div>
-                <div>정면 Ref: <span className={debugInfo.frontRef ? 'text-green-400' : 'text-red-400'}>{debugInfo.frontRef ? '✓ 연결됨' : '✗ null'}</span></div>
-                <div>측면 ready: <span className="text-blue-400">{debugInfo.sideVideoReady}</span></div>
-                <div>정면 ready: <span className="text-blue-400">{debugInfo.frontVideoReady}</span></div>
-                <div>측면 src: <span className={debugInfo.sideVideoSrc ? 'text-green-400' : 'text-red-400'}>{debugInfo.sideVideoSrc ? '✓' : '✗'}</span></div>
-                <div>정면 src: <span className={debugInfo.frontVideoSrc ? 'text-green-400' : 'text-red-400'}>{debugInfo.frontVideoSrc ? '✓' : '✗'}</span></div>
-                <div>분석 중: <span className={isAnalyzing ? 'text-green-400' : 'text-yellow-400'}>{isAnalyzing ? '✓' : '✗'}</span></div>
-                <div>로딩: <span className={cameraLoading ? 'text-yellow-400' : 'text-slate-400'}>{cameraLoading ? '로딩 중...' : '완료'}</span></div>
+            {/* AI 감지 결과 패널 */}
+            <div className="bg-gradient-to-r from-blue-900/50 to-purple-900/50 border border-blue-500/50 rounded-lg p-3 text-sm">
+              <div className="text-blue-400 font-bold mb-2">🤖 AI 자동 감지 결과</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-800/50 rounded-lg p-2">
+                  <div className="text-slate-400 text-xs mb-1">영상 1 (왼쪽)</div>
+                  <div className={`font-bold ${video1DetectedType === 'side' ? 'text-green-400' : video1DetectedType === 'front' ? 'text-purple-400' : 'text-yellow-400'}`}>
+                    {video1DetectedType === 'side' ? '📐 측면 (분석용)' : video1DetectedType === 'front' ? '👤 정면 (보조)' : '⏳ 감지 중...'}
+                  </div>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-2">
+                  <div className="text-slate-400 text-xs mb-1">영상 2 (오른쪽)</div>
+                  <div className={`font-bold ${video2DetectedType === 'side' ? 'text-green-400' : video2DetectedType === 'front' ? 'text-purple-400' : 'text-yellow-400'}`}>
+                    {video2DetectedType === 'side' ? '📐 측면 (분석용)' : video2DetectedType === 'front' ? '👤 정면 (보조)' : '⏳ 감지 중...'}
+                  </div>
+                </div>
               </div>
+              <div className="text-slate-500 text-xs mt-2">* 어깨/엉덩이 좌우 거리로 자동 판별</div>
             </div>
 
             {/* 진행률 */}
@@ -1832,10 +1909,12 @@ function BBSTestPage() {
                     className="absolute inset-0 w-full h-full object-contain"
                     playsInline
                     muted
+                    controls
                     onLoadedData={() => console.log('[Item1-Side] loadeddata')}
                     onPlay={() => console.log('[Item1-Side] playing')}
+                    onError={(e) => console.error('[Item1-Side] error:', e)}
                   />
-                  <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
+                  <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
                   {/* 상태 표시 */}
                   {sideVideoUrl && cameraLoading && (
                     <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
@@ -1896,10 +1975,11 @@ function BBSTestPage() {
                     className="absolute inset-0 w-full h-full object-contain"
                     playsInline
                     muted
+                    controls
                     onLoadedData={() => console.log('[Front] loadeddata')}
                     onPlay={() => console.log('[Front] playing')}
                   />
-                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
+                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
                   {!frontVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
@@ -2425,10 +2505,11 @@ function BBSTestPage() {
                     className="absolute inset-0 w-full h-full object-contain"
                     playsInline
                     muted
+                    controls
                     onLoadedData={() => console.log('[Front] loadeddata')}
                     onPlay={() => console.log('[Front] playing')}
                   />
-                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
+                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
                   {!frontVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
