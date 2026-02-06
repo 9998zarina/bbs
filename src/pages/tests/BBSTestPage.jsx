@@ -907,22 +907,16 @@ function BBSTestPage() {
     }
   }, [sideVideoUrl, frontVideoUrl, initSingleVideoAnalysis]);
 
-  // 동영상 재생/일시정지 토글 (양쪽 동시)
-  const toggleVideoPause = useCallback(() => {
+  // 측면 동영상 재생/일시정지 토글
+  const toggleSideVideoPause = useCallback(() => {
     const sideVideo = sideVideoRef.current;
-    const frontVideo = frontVideoRef.current;
+    if (!sideVideo) return;
 
-    const isPaused = (sideVideo && sideVideo.paused) || (frontVideo && frontVideo.paused);
-
-    if (isPaused) {
-      // 재생
-      if (sideVideo) sideVideo.play();
-      if (frontVideo) frontVideo.play();
+    if (sideVideo.paused) {
+      sideVideo.play();
       setIsSideVideoPaused(false);
-      setIsFrontVideoPaused(false);
-
-      // 분석 재개 - 측면
-      if (sideVideo && sidePoseRef.current) {
+      // 분석 재개
+      if (sidePoseRef.current) {
         const analyzeSideFrame = async () => {
           if (!sideVideo || sideVideo.paused || sideVideo.ended) return;
           setSideVideoProgress(sideVideo.currentTime);
@@ -933,9 +927,23 @@ function BBSTestPage() {
         };
         analyzeSideFrame();
       }
+    } else {
+      sideVideo.pause();
+      setIsSideVideoPaused(true);
+      if (sideAnalysisRef.current) cancelAnimationFrame(sideAnalysisRef.current);
+    }
+  }, []);
 
-      // 분석 재개 - 정면
-      if (frontVideo && frontPoseRef.current) {
+  // 정면 동영상 재생/일시정지 토글
+  const toggleFrontVideoPause = useCallback(() => {
+    const frontVideo = frontVideoRef.current;
+    if (!frontVideo) return;
+
+    if (frontVideo.paused) {
+      frontVideo.play();
+      setIsFrontVideoPaused(false);
+      // 분석 재개
+      if (frontPoseRef.current) {
         const analyzeFrontFrame = async () => {
           if (!frontVideo || frontVideo.paused || frontVideo.ended) return;
           setFrontVideoProgress(frontVideo.currentTime);
@@ -947,25 +955,24 @@ function BBSTestPage() {
         analyzeFrontFrame();
       }
     } else {
-      // 일시정지
-      if (sideVideo) sideVideo.pause();
-      if (frontVideo) frontVideo.pause();
-      setIsSideVideoPaused(true);
+      frontVideo.pause();
       setIsFrontVideoPaused(true);
-      if (sideAnalysisRef.current) cancelAnimationFrame(sideAnalysisRef.current);
       if (frontAnalysisRef.current) cancelAnimationFrame(frontAnalysisRef.current);
     }
   }, []);
 
-  // 동영상 시간 이동 (양쪽 동시)
-  const seekVideo = useCallback((time) => {
+  // 측면 동영상 시간 이동
+  const seekSideVideo = useCallback((time) => {
     const sideVideo = sideVideoRef.current;
-    const frontVideo = frontVideoRef.current;
-
     if (sideVideo) {
       sideVideo.currentTime = time;
       setSideVideoProgress(time);
     }
+  }, []);
+
+  // 정면 동영상 시간 이동
+  const seekFrontVideo = useCallback((time) => {
+    const frontVideo = frontVideoRef.current;
     if (frontVideo) {
       frontVideo.currentTime = time;
       setFrontVideoProgress(time);
@@ -1675,12 +1682,12 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 양쪽 동영상 뷰 (측면 + 정면 동시 표시) */}
-            <div className="grid grid-cols-2 gap-2">
+            {/* 양쪽 동영상 뷰 (측면 + 정면 개별 재생) */}
+            <div className="grid grid-cols-2 gap-3">
               {/* 측면 영상 */}
-              <div className="relative">
-                <div className="text-center text-slate-300 font-medium mb-1 text-sm">📐 측면</div>
-                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+              <div className="space-y-2">
+                <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
+                <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
                   <video ref={sideVideoRef} className="hidden" playsInline muted />
                   <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
                   {!sideVideoUrl && (
@@ -1689,12 +1696,44 @@ function BBSTestPage() {
                     </div>
                   )}
                 </div>
+                {/* 측면 영상 컨트롤 */}
+                {isAnalyzing && !cameraLoading && sideVideoUrl && (
+                  <div className="bg-slate-800/80 rounded-lg p-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={toggleSideVideoPause}
+                        className="w-8 h-8 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors flex-shrink-0"
+                      >
+                        {isSideVideoPaused ? (
+                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                          </svg>
+                        )}
+                      </button>
+                      <input
+                        type="range"
+                        min="0"
+                        max={sideVideoDuration || 100}
+                        value={sideVideoProgress}
+                        onChange={(e) => seekSideVideo(parseFloat(e.target.value))}
+                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                      />
+                    </div>
+                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
+                      {Math.floor(sideVideoProgress / 60)}:{String(Math.floor(sideVideoProgress % 60)).padStart(2, '0')} / {Math.floor(sideVideoDuration / 60)}:{String(Math.floor(sideVideoDuration % 60)).padStart(2, '0')}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 정면 영상 */}
-              <div className="relative">
-                <div className="text-center text-slate-300 font-medium mb-1 text-sm">👤 정면</div>
-                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+              <div className="space-y-2">
+                <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
+                <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
                   <video ref={frontVideoRef} className="hidden" playsInline muted />
                   <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
                   {!frontVideoUrl && (
@@ -1703,6 +1742,38 @@ function BBSTestPage() {
                     </div>
                   )}
                 </div>
+                {/* 정면 영상 컨트롤 */}
+                {isAnalyzing && !cameraLoading && frontVideoUrl && (
+                  <div className="bg-slate-800/80 rounded-lg p-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={toggleFrontVideoPause}
+                        className="w-8 h-8 rounded-full bg-purple-500 hover:bg-purple-600 flex items-center justify-center transition-colors flex-shrink-0"
+                      >
+                        {isFrontVideoPaused ? (
+                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                          </svg>
+                        )}
+                      </button>
+                      <input
+                        type="range"
+                        min="0"
+                        max={frontVideoDuration || 100}
+                        value={frontVideoProgress}
+                        onChange={(e) => seekFrontVideo(parseFloat(e.target.value))}
+                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                    </div>
+                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
+                      {Math.floor(frontVideoProgress / 60)}:{String(Math.floor(frontVideoProgress % 60)).padStart(2, '0')} / {Math.floor(frontVideoDuration / 60)}:{String(Math.floor(frontVideoDuration % 60)).padStart(2, '0')}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1720,41 +1791,6 @@ function BBSTestPage() {
               <div className="mt-4 text-center">
                 <div className="w-12 h-12 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
                 <p className="text-slate-300 mt-2">동영상 분석 준비 중...</p>
-              </div>
-            )}
-
-            {/* 동영상 재생 컨트롤 (분석 중일 때) */}
-            {isAnalyzing && !cameraLoading && (
-              <div className="mt-3 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={toggleVideoPause}
-                    className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
-                  >
-                    {(isSideVideoPaused || isFrontVideoPaused) ? (
-                      <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                    ) : (
-                      <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                      </svg>
-                    )}
-                  </button>
-                  <div className="flex-1">
-                    <input
-                      type="range"
-                      min="0"
-                      max={Math.max(sideVideoDuration, frontVideoDuration) || 100}
-                      value={Math.max(sideVideoProgress, frontVideoProgress)}
-                      onChange={(e) => seekVideo(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
-                  </div>
-                  <div className="text-white text-sm font-mono min-w-[80px] text-right">
-                    {Math.floor(Math.max(sideVideoProgress, frontVideoProgress) / 60)}:{String(Math.floor(Math.max(sideVideoProgress, frontVideoProgress) % 60)).padStart(2, '0')} / {Math.floor(Math.max(sideVideoDuration, frontVideoDuration) / 60)}:{String(Math.floor(Math.max(sideVideoDuration, frontVideoDuration) % 60)).padStart(2, '0')}
-                  </div>
-                </div>
               </div>
             )}
 
@@ -2139,12 +2175,12 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 양쪽 동영상 뷰 (측면 + 정면 동시 표시) */}
-            <div className="grid grid-cols-2 gap-2">
+            {/* 양쪽 동영상 뷰 (측면 + 정면 개별 재생) */}
+            <div className="grid grid-cols-2 gap-3">
               {/* 측면 영상 */}
-              <div className="relative">
-                <div className="text-center text-slate-300 font-medium mb-1 text-sm">📐 측면</div>
-                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+              <div className="space-y-2">
+                <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
+                <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
                   <video ref={sideVideoRef} className="hidden" playsInline muted />
                   <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
                   {!sideVideoUrl && (
@@ -2153,12 +2189,44 @@ function BBSTestPage() {
                     </div>
                   )}
                 </div>
+                {/* 측면 영상 컨트롤 */}
+                {isAnalyzing && !cameraLoading && sideVideoUrl && (
+                  <div className="bg-slate-800/80 rounded-lg p-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={toggleSideVideoPause}
+                        className="w-8 h-8 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors flex-shrink-0"
+                      >
+                        {isSideVideoPaused ? (
+                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                          </svg>
+                        )}
+                      </button>
+                      <input
+                        type="range"
+                        min="0"
+                        max={sideVideoDuration || 100}
+                        value={sideVideoProgress}
+                        onChange={(e) => seekSideVideo(parseFloat(e.target.value))}
+                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                      />
+                    </div>
+                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
+                      {Math.floor(sideVideoProgress / 60)}:{String(Math.floor(sideVideoProgress % 60)).padStart(2, '0')} / {Math.floor(sideVideoDuration / 60)}:{String(Math.floor(sideVideoDuration % 60)).padStart(2, '0')}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 정면 영상 */}
-              <div className="relative">
-                <div className="text-center text-slate-300 font-medium mb-1 text-sm">👤 정면</div>
-                <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+              <div className="space-y-2">
+                <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
+                <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
                   <video ref={frontVideoRef} className="hidden" playsInline muted />
                   <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
                   {!frontVideoUrl && (
@@ -2167,6 +2235,38 @@ function BBSTestPage() {
                     </div>
                   )}
                 </div>
+                {/* 정면 영상 컨트롤 */}
+                {isAnalyzing && !cameraLoading && frontVideoUrl && (
+                  <div className="bg-slate-800/80 rounded-lg p-2">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={toggleFrontVideoPause}
+                        className="w-8 h-8 rounded-full bg-purple-500 hover:bg-purple-600 flex items-center justify-center transition-colors flex-shrink-0"
+                      >
+                        {isFrontVideoPaused ? (
+                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                          </svg>
+                        )}
+                      </button>
+                      <input
+                        type="range"
+                        min="0"
+                        max={frontVideoDuration || 100}
+                        value={frontVideoProgress}
+                        onChange={(e) => seekFrontVideo(parseFloat(e.target.value))}
+                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                    </div>
+                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
+                      {Math.floor(frontVideoProgress / 60)}:{String(Math.floor(frontVideoProgress % 60)).padStart(2, '0')} / {Math.floor(frontVideoDuration / 60)}:{String(Math.floor(frontVideoDuration % 60)).padStart(2, '0')}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -2184,41 +2284,6 @@ function BBSTestPage() {
               <div className="mt-4 text-center">
                 <div className="w-12 h-12 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
                 <p className="text-slate-300 mt-2">동영상 분석 준비 중...</p>
-              </div>
-            )}
-
-            {/* 동영상 재생 컨트롤 (분석 중일 때) */}
-            {isAnalyzing && !cameraLoading && (
-              <div className="mt-3 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={toggleVideoPause}
-                    className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
-                  >
-                    {(isSideVideoPaused || isFrontVideoPaused) ? (
-                      <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                    ) : (
-                      <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                      </svg>
-                    )}
-                  </button>
-                  <div className="flex-1">
-                    <input
-                      type="range"
-                      min="0"
-                      max={Math.max(sideVideoDuration, frontVideoDuration) || 100}
-                      value={Math.max(sideVideoProgress, frontVideoProgress)}
-                      onChange={(e) => seekVideo(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
-                  </div>
-                  <div className="text-white text-sm font-mono min-w-[80px] text-right">
-                    {Math.floor(Math.max(sideVideoProgress, frontVideoProgress) / 60)}:{String(Math.floor(Math.max(sideVideoProgress, frontVideoProgress) % 60)).padStart(2, '0')} / {Math.floor(Math.max(sideVideoDuration, frontVideoDuration) / 60)}:{String(Math.floor(Math.max(sideVideoDuration, frontVideoDuration) % 60)).padStart(2, '0')}
-                  </div>
-                </div>
               </div>
             )}
 
@@ -2585,12 +2650,12 @@ function BBSTestPage() {
             </div>
           </Card>
 
-          {/* 양쪽 동영상 뷰 (측면 + 정면 동시 표시) */}
-          <div className="grid grid-cols-2 gap-2">
+          {/* 양쪽 동영상 뷰 (측면 + 정면 개별 재생) */}
+          <div className="grid grid-cols-2 gap-3">
             {/* 측면 영상 */}
-            <div className="relative">
-              <div className="text-center text-slate-300 font-medium mb-1 text-sm">📐 측면</div>
-              <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+            <div className="space-y-2">
+              <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
+              <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
                 <video ref={sideVideoRef} className="hidden" playsInline muted />
                 <canvas ref={sideCanvasRef} className="w-full h-full object-contain" />
                 {!sideVideoUrl && (
@@ -2599,12 +2664,44 @@ function BBSTestPage() {
                   </div>
                 )}
               </div>
+              {/* 측면 영상 컨트롤 */}
+              {isAnalyzing && !cameraLoading && sideVideoUrl && (
+                <div className="bg-slate-800/80 rounded-lg p-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={toggleSideVideoPause}
+                      className="w-8 h-8 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors flex-shrink-0"
+                    >
+                      {isSideVideoPaused ? (
+                        <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                        </svg>
+                      )}
+                    </button>
+                    <input
+                      type="range"
+                      min="0"
+                      max={sideVideoDuration || 100}
+                      value={sideVideoProgress}
+                      onChange={(e) => seekSideVideo(parseFloat(e.target.value))}
+                      className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
+                  </div>
+                  <div className="text-slate-400 text-xs font-mono text-center mt-1">
+                    {Math.floor(sideVideoProgress / 60)}:{String(Math.floor(sideVideoProgress % 60)).padStart(2, '0')} / {Math.floor(sideVideoDuration / 60)}:{String(Math.floor(sideVideoDuration % 60)).padStart(2, '0')}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* 정면 영상 */}
-            <div className="relative">
-              <div className="text-center text-slate-300 font-medium mb-1 text-sm">👤 정면</div>
-              <div className="aspect-[9/16] max-h-[50vh] bg-slate-800 rounded-xl overflow-hidden relative">
+            <div className="space-y-2">
+              <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
+              <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
                 <video ref={frontVideoRef} className="hidden" playsInline muted />
                 <canvas ref={frontCanvasRef} className="w-full h-full object-contain" />
                 {!frontVideoUrl && (
@@ -2613,6 +2710,38 @@ function BBSTestPage() {
                   </div>
                 )}
               </div>
+              {/* 정면 영상 컨트롤 */}
+              {isAnalyzing && !cameraLoading && frontVideoUrl && (
+                <div className="bg-slate-800/80 rounded-lg p-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={toggleFrontVideoPause}
+                      className="w-8 h-8 rounded-full bg-purple-500 hover:bg-purple-600 flex items-center justify-center transition-colors flex-shrink-0"
+                    >
+                      {isFrontVideoPaused ? (
+                        <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                        </svg>
+                      )}
+                    </button>
+                    <input
+                      type="range"
+                      min="0"
+                      max={frontVideoDuration || 100}
+                      value={frontVideoProgress}
+                      onChange={(e) => seekFrontVideo(parseFloat(e.target.value))}
+                      className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                    />
+                  </div>
+                  <div className="text-slate-400 text-xs font-mono text-center mt-1">
+                    {Math.floor(frontVideoProgress / 60)}:{String(Math.floor(frontVideoProgress % 60)).padStart(2, '0')} / {Math.floor(frontVideoDuration / 60)}:{String(Math.floor(frontVideoDuration % 60)).padStart(2, '0')}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -2631,42 +2760,9 @@ function BBSTestPage() {
             </div>
           )}
 
-          {/* 동영상 재생 컨트롤 & 분석 상태 (분석 중일 때) */}
+          {/* 분석 상태 (분석 중일 때) */}
           {isAnalyzing && !cameraLoading && (
             <div className="mt-3 space-y-2">
-              {/* 재생 컨트롤 */}
-              <div className="bg-slate-900/80 backdrop-blur-sm rounded-xl p-3">
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={toggleVideoPause}
-                    className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
-                  >
-                    {(isSideVideoPaused || isFrontVideoPaused) ? (
-                      <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                    ) : (
-                      <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                      </svg>
-                    )}
-                  </button>
-                  <div className="flex-1">
-                    <input
-                      type="range"
-                      min="0"
-                      max={Math.max(sideVideoDuration, frontVideoDuration) || 100}
-                      value={Math.max(sideVideoProgress, frontVideoProgress)}
-                      onChange={(e) => seekVideo(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
-                  </div>
-                  <div className="text-white text-sm font-mono min-w-[80px] text-right">
-                    {Math.floor(Math.max(sideVideoProgress, frontVideoProgress) / 60)}:{String(Math.floor(Math.max(sideVideoProgress, frontVideoProgress) % 60)).padStart(2, '0')} / {Math.floor(Math.max(sideVideoDuration, frontVideoDuration) / 60)}:{String(Math.floor(Math.max(sideVideoDuration, frontVideoDuration) % 60)).padStart(2, '0')}
-                  </div>
-                </div>
-              </div>
-
               {/* 타이머 & 상태 */}
               <div className="flex items-center justify-between gap-2">
                 {currentBBSItem.duration > 0 && (
