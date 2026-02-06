@@ -1418,10 +1418,10 @@ function BBSTestPage() {
 
                   {/* 미리보기 */}
                   {uploadedVideoUrl && (
-                    <div className="relative rounded-xl overflow-hidden bg-black">
+                    <div className="relative rounded-xl overflow-hidden bg-black flex justify-center">
                       <video
                         src={uploadedVideoUrl}
-                        className="w-full max-h-48 object-contain"
+                        className="max-w-full max-h-64 object-contain"
                         controls
                         muted
                       />
@@ -1557,9 +1557,9 @@ function BBSTestPage() {
             </Card>
 
             {/* 카메라/동영상 뷰 */}
-            <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden relative">
+            <div className={`${inputMode === 'video' ? 'aspect-[9/16] max-h-[70vh]' : 'aspect-video'} bg-slate-800 rounded-2xl overflow-hidden relative mx-auto`}>
               <video ref={videoRef} className="hidden" playsInline />
-              <canvas ref={canvasRef} className="w-full h-full object-cover" />
+              <canvas ref={canvasRef} className="w-full h-full object-contain" />
 
               {/* 시작 전 */}
               {!isAnalyzing && !cameraLoading && (
@@ -2016,9 +2016,9 @@ function BBSTestPage() {
             </Card>
 
             {/* 카메라/동영상 뷰 */}
-            <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden relative">
+            <div className={`${inputMode === 'video' ? 'aspect-[9/16] max-h-[70vh]' : 'aspect-video'} bg-slate-800 rounded-2xl overflow-hidden relative mx-auto`}>
               <video ref={videoRef} className="hidden" playsInline />
-              <canvas ref={canvasRef} className="w-full h-full object-cover" />
+              <canvas ref={canvasRef} className="w-full h-full object-contain" />
 
               {/* 시작 전 */}
               {!isAnalyzing && !cameraLoading && (
@@ -2464,9 +2464,9 @@ function BBSTestPage() {
             </div>
           </Card>
 
-          <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden relative">
+          <div className={`${inputMode === 'video' ? 'aspect-[9/16] max-h-[70vh]' : 'aspect-video'} bg-slate-800 rounded-2xl overflow-hidden relative mx-auto`}>
             <video ref={videoRef} className="hidden" playsInline />
-            <canvas ref={canvasRef} className="w-full h-full object-cover" />
+            <canvas ref={canvasRef} className="w-full h-full object-contain" />
 
             {/* 시작 전 */}
             {!isAnalyzing && !cameraLoading && (
