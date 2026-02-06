@@ -117,6 +117,13 @@ function BBSTestPage() {
   const [patientInfo, setPatientInfo] = useState({ name: '홍길동', id: 'P-DEMO-001' });
   const [showSetup, setShowSetup] = useState(true);
 
+  // 입력 모드: 'camera' 또는 'video'
+  const [inputMode, setInputMode] = useState('camera');
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState(null);
+  const [isVideoPaused, setIsVideoPaused] = useState(false);
+  const [videoProgress, setVideoProgress] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+
   // 카메라/분석 상태
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [cameraLoading, setCameraLoading] = useState(false);
@@ -161,6 +168,8 @@ function BBSTestPage() {
   const analysisHistoryRef = useRef([]);
   const previousAnalysisRef = useRef(null);
   const startTimeRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const videoAnalysisRef = useRef(null); // 동영상 분석 루프 ID
 
   const { navigateTo } = useNavigation();
   const { addTestResult } = useTestHistory();
@@ -690,6 +699,187 @@ function BBSTestPage() {
     }
   }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
 
+  // 동영상 파일 업로드 핸들러
+  const handleVideoUpload = useCallback((event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // 기존 URL 해제
+    if (uploadedVideoUrl) {
+      URL.revokeObjectURL(uploadedVideoUrl);
+    }
+
+    const url = URL.createObjectURL(file);
+    setUploadedVideoUrl(url);
+    setVideoProgress(0);
+    setVideoDuration(0);
+  }, [uploadedVideoUrl]);
+
+  // 동영상 분석 초기화
+  const initVideoAnalysis = useCallback(async () => {
+    setCameraLoading(true);
+
+    try {
+      // 기존 분석 정리
+      if (videoAnalysisRef.current) {
+        cancelAnimationFrame(videoAnalysisRef.current);
+        videoAnalysisRef.current = null;
+      }
+
+      if (!videoRef.current || !canvasRef.current) {
+        console.error('Video or canvas ref not available');
+        setCameraLoading(false);
+        return null;
+      }
+
+      const video = videoRef.current;
+      video.src = uploadedVideoUrl;
+      video.muted = true;
+
+      // 비디오 로드 대기
+      await new Promise((resolve, reject) => {
+        video.onloadeddata = resolve;
+        video.onerror = reject;
+        video.load();
+      });
+
+      setVideoDuration(video.duration);
+
+      const { Pose } = await import('@mediapipe/pose');
+
+      const pose = new Pose({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+      });
+
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        enableSegmentation: false,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+      });
+
+      pose.onResults((results) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext('2d');
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
+
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+        if (results.poseLandmarks) {
+          setCurrentLandmarks(results.poseLandmarks);
+
+          let skeletonColor = '#3B82F6';
+          if (isItem1) {
+            const analysis = handleItem1Analysis(results.poseLandmarks);
+            skeletonColor = analysis.state === PostureState.SITTING ? '#EAB308' :
+                           analysis.state === PostureState.STANDING ? '#10B981' : '#64748B';
+            drawAngleInfo(ctx, analysis, results.poseLandmarks, canvas.width, canvas.height);
+          } else if (isItem2) {
+            const analysis = handleItem2Analysis(results.poseLandmarks);
+            if (analysis && analysis.stability) {
+              skeletonColor = analysis.stability === 'excellent' ? '#10B981' :
+                             analysis.stability === 'good' ? '#22C55E' :
+                             analysis.stability === 'moderate' ? '#EAB308' :
+                             analysis.stability === 'poor' ? '#F97316' : '#EF4444';
+            }
+          } else {
+            handleGeneralAnalysis(results.poseLandmarks);
+          }
+
+          drawConnections(ctx, results.poseLandmarks, canvas.width, canvas.height, {
+            strokeStyle: skeletonColor,
+            lineWidth: 3
+          });
+          drawLandmarks(ctx, results.poseLandmarks, canvas.width, canvas.height, {
+            fillStyle: skeletonColor,
+            radius: 5
+          });
+        }
+
+        ctx.restore();
+      });
+
+      poseRef.current = pose;
+
+      // 비디오 프레임 분석 루프
+      const analyzeVideoFrame = async () => {
+        if (!video || video.paused || video.ended) {
+          if (video.ended) {
+            setIsVideoPaused(true);
+          }
+          return;
+        }
+
+        setVideoProgress(video.currentTime);
+
+        if (poseRef.current && video.readyState >= 2) {
+          try {
+            await poseRef.current.send({ image: video });
+          } catch (e) {
+            console.log('Video frame analysis error:', e);
+          }
+        }
+
+        videoAnalysisRef.current = requestAnimationFrame(analyzeVideoFrame);
+      };
+
+      // 비디오 재생 시작
+      await video.play();
+      setIsVideoPaused(false);
+      analyzeVideoFrame();
+
+      setCameraLoading(false);
+      return true;
+    } catch (error) {
+      console.error('Video analysis init error:', error);
+      setCameraLoading(false);
+      return null;
+    }
+  }, [uploadedVideoUrl, isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
+
+  // 동영상 재생/일시정지 토글
+  const toggleVideoPause = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (video.paused) {
+      video.play();
+      setIsVideoPaused(false);
+      // 분석 재개
+      const analyzeVideoFrame = async () => {
+        if (!video || video.paused || video.ended) return;
+        setVideoProgress(video.currentTime);
+        if (poseRef.current && video.readyState >= 2) {
+          try {
+            await poseRef.current.send({ image: video });
+          } catch (e) {}
+        }
+        videoAnalysisRef.current = requestAnimationFrame(analyzeVideoFrame);
+      };
+      analyzeVideoFrame();
+    } else {
+      video.pause();
+      setIsVideoPaused(true);
+      if (videoAnalysisRef.current) {
+        cancelAnimationFrame(videoAnalysisRef.current);
+      }
+    }
+  }, []);
+
+  // 동영상 시간 이동
+  const seekVideo = useCallback((time) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = time;
+    setVideoProgress(time);
+  }, []);
+
   // 항목 시작
   const startItem = async () => {
     setIsAnalyzing(true);
@@ -764,7 +954,12 @@ function BBSTestPage() {
       setItemTimer(elapsed);
     }, 100);
 
-    await initPose();
+    // 입력 모드에 따라 카메라 또는 동영상 분석 시작
+    if (inputMode === 'video' && uploadedVideoUrl) {
+      await initVideoAnalysis();
+    } else {
+      await initPose();
+    }
   };
 
   // 점수 저장
@@ -773,6 +968,14 @@ function BBSTestPage() {
     if (cameraRef.current) {
       cameraRef.current.stop();
       cameraRef.current = null;
+    }
+    // 동영상 분석 정리
+    if (videoAnalysisRef.current) {
+      cancelAnimationFrame(videoAnalysisRef.current);
+      videoAnalysisRef.current = null;
+    }
+    if (videoRef.current && inputMode === 'video') {
+      videoRef.current.pause();
     }
 
     const newScores = [...scores];
@@ -833,6 +1036,14 @@ function BBSTestPage() {
     if (cameraRef.current) {
       cameraRef.current.stop();
       cameraRef.current = null;
+    }
+    // 동영상 분석 정리
+    if (videoAnalysisRef.current) {
+      cancelAnimationFrame(videoAnalysisRef.current);
+      videoAnalysisRef.current = null;
+    }
+    if (videoRef.current && inputMode === 'video') {
+      videoRef.current.pause();
     }
 
     // 음성 중단
@@ -897,6 +1108,14 @@ function BBSTestPage() {
     if (cameraRef.current) {
       cameraRef.current.stop();
       cameraRef.current = null;
+    }
+    // 동영상 분석 정리
+    if (videoAnalysisRef.current) {
+      cancelAnimationFrame(videoAnalysisRef.current);
+      videoAnalysisRef.current = null;
+    }
+    if (videoRef.current && inputMode === 'video') {
+      videoRef.current.pause();
     }
 
     // 음성 중단
@@ -972,6 +1191,14 @@ function BBSTestPage() {
       cameraRef.current.stop();
       cameraRef.current = null;
     }
+    // 동영상 분석 정리
+    if (videoAnalysisRef.current) {
+      cancelAnimationFrame(videoAnalysisRef.current);
+      videoAnalysisRef.current = null;
+    }
+    if (videoRef.current && inputMode === 'video') {
+      videoRef.current.pause();
+    }
 
     // 음성 중단
     if ('speechSynthesis' in window) {
@@ -998,12 +1225,20 @@ function BBSTestPage() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (cameraRef.current) cameraRef.current.stop();
+      // 동영상 분석 정리
+      if (videoAnalysisRef.current) {
+        cancelAnimationFrame(videoAnalysisRef.current);
+      }
+      // 업로드된 비디오 URL 해제
+      if (uploadedVideoUrl) {
+        URL.revokeObjectURL(uploadedVideoUrl);
+      }
       // 음성 중단
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
     };
-  }, []);
+  }, [uploadedVideoUrl]);
 
   // 음성 안내 - 단계 변화 시
   const lastSpokenPhaseRef = useRef(null);
@@ -1122,8 +1357,88 @@ function BBSTestPage() {
               />
             </Card>
 
-            <Button variant="bbs" size="lg" fullWidth onClick={() => setShowSetup(false)}>
-              검사 시작
+            {/* 입력 방식 선택 */}
+            <Card padding="md">
+              <h3 className="text-white font-semibold mb-4">입력 방식 선택</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <button
+                  onClick={() => setInputMode('camera')}
+                  className={`p-4 rounded-xl border-2 transition-all ${
+                    inputMode === 'camera'
+                      ? 'border-blue-500 bg-blue-500/20 text-blue-400'
+                      : 'border-slate-700 bg-slate-800/50 text-slate-400 hover:border-slate-600'
+                  }`}
+                >
+                  <div className="text-3xl mb-2">📹</div>
+                  <div className="font-semibold">실시간 카메라</div>
+                  <div className="text-xs mt-1 opacity-80">웹캠으로 실시간 분석</div>
+                </button>
+                <button
+                  onClick={() => setInputMode('video')}
+                  className={`p-4 rounded-xl border-2 transition-all ${
+                    inputMode === 'video'
+                      ? 'border-blue-500 bg-blue-500/20 text-blue-400'
+                      : 'border-slate-700 bg-slate-800/50 text-slate-400 hover:border-slate-600'
+                  }`}
+                >
+                  <div className="text-3xl mb-2">🎬</div>
+                  <div className="font-semibold">동영상 업로드</div>
+                  <div className="text-xs mt-1 opacity-80">촬영된 영상 분석</div>
+                </button>
+              </div>
+
+              {/* 동영상 업로드 영역 */}
+              {inputMode === 'video' && (
+                <div className="mt-4 space-y-3">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="video/*"
+                    onChange={handleVideoUpload}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full p-4 border-2 border-dashed border-slate-600 rounded-xl hover:border-blue-500 hover:bg-blue-500/10 transition-all"
+                  >
+                    {uploadedVideoUrl ? (
+                      <div className="text-green-400">
+                        <span className="text-2xl">✓</span>
+                        <div className="mt-1">동영상 업로드 완료</div>
+                        <div className="text-xs text-slate-400 mt-1">클릭하여 다른 파일 선택</div>
+                      </div>
+                    ) : (
+                      <div className="text-slate-400">
+                        <span className="text-2xl">📁</span>
+                        <div className="mt-1">동영상 파일을 선택하세요</div>
+                        <div className="text-xs mt-1">MP4, MOV, AVI 등 지원</div>
+                      </div>
+                    )}
+                  </button>
+
+                  {/* 미리보기 */}
+                  {uploadedVideoUrl && (
+                    <div className="relative rounded-xl overflow-hidden bg-black">
+                      <video
+                        src={uploadedVideoUrl}
+                        className="w-full max-h-48 object-contain"
+                        controls
+                        muted
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+
+            <Button
+              variant="bbs"
+              size="lg"
+              fullWidth
+              onClick={() => setShowSetup(false)}
+              disabled={inputMode === 'video' && !uploadedVideoUrl}
+            >
+              {inputMode === 'video' && !uploadedVideoUrl ? '동영상을 업로드해주세요' : '검사 시작'}
             </Button>
           </div>
         </main>
@@ -1241,21 +1556,27 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 카메라 뷰 */}
+            {/* 카메라/동영상 뷰 */}
             <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden relative">
               <video ref={videoRef} className="hidden" playsInline />
               <canvas ref={canvasRef} className="w-full h-full object-cover" />
 
-              {/* 카메라 시작 전 */}
+              {/* 시작 전 */}
               {!isAnalyzing && !cameraLoading && (
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
                   <div className="text-center space-y-4">
                     <div className="w-24 h-24 mx-auto rounded-full bg-blue-500/20 flex items-center justify-center">
-                      <svg className="w-12 h-12 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
+                      {inputMode === 'video' ? (
+                        <span className="text-5xl">🎬</span>
+                      ) : (
+                        <svg className="w-12 h-12 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                      )}
                     </div>
-                    <p className="text-slate-300">전신이 보이도록 카메라를 배치해주세요</p>
+                    <p className="text-slate-300">
+                      {inputMode === 'video' ? '동영상 분석을 시작합니다' : '전신이 보이도록 카메라를 배치해주세요'}
+                    </p>
                     <Button variant="bbs" size="lg" onClick={startItem}>
                       검사 시작
                     </Button>
@@ -1263,12 +1584,49 @@ function BBSTestPage() {
                 </div>
               )}
 
-              {/* 카메라 로딩 중 */}
+              {/* 로딩 중 */}
               {cameraLoading && (
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
                   <div className="text-center space-y-4">
                     <div className="w-16 h-16 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                    <p className="text-slate-300">카메라 초기화 중...</p>
+                    <p className="text-slate-300">
+                      {inputMode === 'video' ? '동영상 분석 준비 중...' : '카메라 초기화 중...'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* 동영상 재생 컨트롤 (분석 중일 때) */}
+              {isAnalyzing && !cameraLoading && inputMode === 'video' && (
+                <div className="absolute bottom-4 left-4 right-4 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3 z-30">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={toggleVideoPause}
+                      className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
+                    >
+                      {isVideoPaused ? (
+                        <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                        </svg>
+                      )}
+                    </button>
+                    <div className="flex-1">
+                      <input
+                        type="range"
+                        min="0"
+                        max={videoDuration || 100}
+                        value={videoProgress}
+                        onChange={(e) => seekVideo(parseFloat(e.target.value))}
+                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                      />
+                    </div>
+                    <div className="text-white text-sm font-mono min-w-[80px] text-right">
+                      {Math.floor(videoProgress / 60)}:{String(Math.floor(videoProgress % 60)).padStart(2, '0')} / {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, '0')}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1657,21 +2015,27 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 카메라 뷰 */}
+            {/* 카메라/동영상 뷰 */}
             <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden relative">
               <video ref={videoRef} className="hidden" playsInline />
               <canvas ref={canvasRef} className="w-full h-full object-cover" />
 
-              {/* 카메라 시작 전 */}
+              {/* 시작 전 */}
               {!isAnalyzing && !cameraLoading && (
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
                   <div className="text-center space-y-4">
                     <div className="w-24 h-24 mx-auto rounded-full bg-blue-500/20 flex items-center justify-center">
-                      <svg className="w-12 h-12 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
+                      {inputMode === 'video' ? (
+                        <span className="text-5xl">🎬</span>
+                      ) : (
+                        <svg className="w-12 h-12 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                      )}
                     </div>
-                    <p className="text-slate-300">전신이 보이도록 카메라를 배치해주세요</p>
+                    <p className="text-slate-300">
+                      {inputMode === 'video' ? '동영상 분석을 시작합니다' : '전신이 보이도록 카메라를 배치해주세요'}
+                    </p>
                     <Button variant="bbs" size="lg" onClick={startItem}>
                       검사 시작
                     </Button>
@@ -1679,12 +2043,49 @@ function BBSTestPage() {
                 </div>
               )}
 
-              {/* 카메라 로딩 중 */}
+              {/* 로딩 중 */}
               {cameraLoading && (
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
                   <div className="text-center space-y-4">
                     <div className="w-16 h-16 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                    <p className="text-slate-300">카메라 초기화 중...</p>
+                    <p className="text-slate-300">
+                      {inputMode === 'video' ? '동영상 분석 준비 중...' : '카메라 초기화 중...'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* 동영상 재생 컨트롤 (분석 중일 때) - 아이템2용은 상단에 배치 (진행률 바와 겹치지 않게) */}
+              {isAnalyzing && !cameraLoading && inputMode === 'video' && (
+                <div className="absolute top-20 left-4 right-4 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3 z-30">
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={toggleVideoPause}
+                      className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
+                    >
+                      {isVideoPaused ? (
+                        <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                        </svg>
+                      )}
+                    </button>
+                    <div className="flex-1">
+                      <input
+                        type="range"
+                        min="0"
+                        max={videoDuration || 100}
+                        value={videoProgress}
+                        onChange={(e) => seekVideo(parseFloat(e.target.value))}
+                        className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                      />
+                    </div>
+                    <div className="text-white text-sm font-mono min-w-[80px] text-right">
+                      {Math.floor(videoProgress / 60)}:{String(Math.floor(videoProgress % 60)).padStart(2, '0')} / {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, '0')}
+                    </div>
                   </div>
                 </div>
               )}
@@ -2067,14 +2468,73 @@ function BBSTestPage() {
             <video ref={videoRef} className="hidden" playsInline />
             <canvas ref={canvasRef} className="w-full h-full object-cover" />
 
-            {!isAnalyzing && (
+            {/* 시작 전 */}
+            {!isAnalyzing && !cameraLoading && (
               <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
-                <Button variant="bbs" size="lg" onClick={startItem}>항목 시작</Button>
+                <div className="text-center space-y-4">
+                  <div className="w-20 h-20 mx-auto rounded-full bg-blue-500/20 flex items-center justify-center">
+                    {inputMode === 'video' ? (
+                      <span className="text-4xl">🎬</span>
+                    ) : (
+                      <svg className="w-10 h-10 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                      </svg>
+                    )}
+                  </div>
+                  <Button variant="bbs" size="lg" onClick={startItem}>항목 시작</Button>
+                </div>
+              </div>
+            )}
+
+            {/* 로딩 중 */}
+            {cameraLoading && (
+              <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
+                <div className="text-center space-y-4">
+                  <div className="w-16 h-16 mx-auto border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-slate-300">
+                    {inputMode === 'video' ? '동영상 분석 준비 중...' : '카메라 초기화 중...'}
+                  </p>
+                </div>
               </div>
             )}
 
             {isAnalyzing && (
               <>
+                {/* 동영상 재생 컨트롤 */}
+                {inputMode === 'video' && (
+                  <div className="absolute top-20 left-4 right-4 bg-slate-900/80 backdrop-blur-sm rounded-xl p-3 z-30">
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={toggleVideoPause}
+                        className="w-10 h-10 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors"
+                      >
+                        {isVideoPaused ? (
+                          <svg className="w-5 h-5 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                          </svg>
+                        )}
+                      </button>
+                      <div className="flex-1">
+                        <input
+                          type="range"
+                          min="0"
+                          max={videoDuration || 100}
+                          value={videoProgress}
+                          onChange={(e) => seekVideo(parseFloat(e.target.value))}
+                          className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                        />
+                      </div>
+                      <div className="text-white text-sm font-mono min-w-[80px] text-right">
+                        {Math.floor(videoProgress / 60)}:{String(Math.floor(videoProgress % 60)).padStart(2, '0')} / {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, '0')}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {currentBBSItem.duration > 0 && (
                   <div className="absolute top-4 left-4 bg-slate-900/80 px-4 py-2 rounded-full">
                     <span className="text-white font-mono text-xl">
