@@ -1,0 +1,75 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# YOLO models
+*.pt
+
+# Data directories
+patient_data/
+reports/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Videos
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Analysis images
+analysis/
+
+# Large files
+*.zip
+*.tar.gz
+
+# Node
+node_modules/
+.npm
+*.tgz
+
+# Submodules and temp folders
+care/
+python_tracker/
+verification/
+final_verification/
