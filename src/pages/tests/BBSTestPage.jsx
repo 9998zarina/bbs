@@ -890,10 +890,8 @@ function BBSTestPage() {
     setCurrentItem(currentItem - 1);
   };
 
-  // 다음 항목으로 이동 (점수 없이 건너뛰기)
+  // 다음 항목으로 이동 (4점 만점 자동 채점 - 치료사 판단하에 정상으로 간주)
   const goToNextItem = () => {
-    if (currentItem >= 13) return;
-
     // 현재 분석 중지
     if (timerRef.current) clearInterval(timerRef.current);
     if (cameraRef.current) {
@@ -905,6 +903,11 @@ function BBSTestPage() {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
+
+    // 현재 항목에 4점 부여 (치료사 판단: 정상)
+    const newScores = [...scores];
+    newScores[currentItem] = 4;
+    setScores(newScores);
 
     setIsAnalyzing(false);
     setItemTimer(0);
@@ -953,7 +956,42 @@ function BBSTestPage() {
       debug: null
     });
 
-    setCurrentItem(currentItem + 1);
+    // 마지막 항목이면 테스트 완료
+    if (currentItem >= 13) {
+      completeTest(newScores);
+    } else {
+      setCurrentItem(currentItem + 1);
+    }
+  };
+
+  // 긴급 종료 (Emergency) - 나머지 항목 모두 0점 처리
+  const emergencyStop = () => {
+    // 현재 분석 중지
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (cameraRef.current) {
+      cameraRef.current.stop();
+      cameraRef.current = null;
+    }
+
+    // 음성 중단
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
+    // 나머지 모든 항목 0점 처리
+    const newScores = [...scores];
+    for (let i = currentItem; i < 14; i++) {
+      if (newScores[i] === null) {
+        newScores[i] = 0;
+      }
+    }
+
+    setIsAnalyzing(false);
+    setItemTimer(0);
+    setCurrentLandmarks(null);
+
+    // 테스트 완료
+    completeTest(newScores);
   };
 
   useEffect(() => {
@@ -1484,57 +1522,67 @@ function BBSTestPage() {
         {/* 하단 고정 네비게이션 */}
         {!sitToStandState.showResultModal && (
           <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-700 p-4 z-40">
-            <div className="max-w-4xl mx-auto flex gap-3">
-              <Button
-                variant="ghost"
-                className="flex-1"
-                disabled={true}
-              >
-                ← 이전
-              </Button>
-              <Button
-                variant="secondary"
-                className="flex-1"
-                onClick={() => {
-                  if (isAnalyzing) {
-                    if (timerRef.current) clearInterval(timerRef.current);
-                    if (cameraRef.current) {
-                      cameraRef.current.stop();
-                      cameraRef.current = null;
+            <div className="max-w-4xl mx-auto space-y-2">
+              <div className="flex gap-3">
+                <Button
+                  variant="ghost"
+                  className="flex-1"
+                  disabled={true}
+                >
+                  ← 이전
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={() => {
+                    if (isAnalyzing) {
+                      if (timerRef.current) clearInterval(timerRef.current);
+                      if (cameraRef.current) {
+                        cameraRef.current.stop();
+                        cameraRef.current = null;
+                      }
+                      setIsAnalyzing(false);
+                      resetStateHistory();
+                      setSitToStandState({
+                        testPhase: 'waiting',
+                        currentPosture: PostureState.UNKNOWN,
+                        handPosition: HandPosition.UNKNOWN,
+                        handSupport: HandSupportState.UNKNOWN,
+                        sittingConfidence: 0,
+                        standingConfidence: 0,
+                        kneeAngle: 0,
+                        hipAngle: 0,
+                        feedback: { message: '의자에 앉아주세요...', type: 'info' },
+                        sittingConfirmedAt: null,
+                        standingDetectedAt: null,
+                        usedHandsDuringTransition: false,
+                        handUsageDetectedAt: null,
+                        autoScore: null,
+                        assessmentReport: null,
+                        showResultModal: false,
+                        debug: null
+                      });
                     }
-                    setIsAnalyzing(false);
-                    resetStateHistory();
-                    setSitToStandState({
-                      testPhase: 'waiting',
-                      currentPosture: PostureState.UNKNOWN,
-                      handPosition: HandPosition.UNKNOWN,
-                      handSupport: HandSupportState.UNKNOWN,
-                      sittingConfidence: 0,
-                      standingConfidence: 0,
-                      kneeAngle: 0,
-                      hipAngle: 0,
-                      feedback: { message: '의자에 앉아주세요...', type: 'info' },
-                      sittingConfirmedAt: null,
-                      standingDetectedAt: null,
-                      usedHandsDuringTransition: false,
-                      handUsageDetectedAt: null,
-                      autoScore: null,
-                      assessmentReport: null,
-                      showResultModal: false,
-                      debug: null
-                    });
-                  }
-                }}
-                disabled={!isAnalyzing}
-              >
-                다시 검사
-              </Button>
+                  }}
+                  disabled={!isAnalyzing}
+                >
+                  다시 검사
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={goToNextItem}
+                >
+                  정상 (4점) →
+                </Button>
+              </div>
               <Button
-                variant="secondary"
-                className="flex-1"
-                onClick={goToNextItem}
+                variant="danger"
+                size="sm"
+                fullWidth
+                onClick={emergencyStop}
               >
-                건너뛰기 →
+                🚨 검사 중단 (Emergency)
               </Button>
             </div>
           </div>
@@ -1918,56 +1966,66 @@ function BBSTestPage() {
         {/* 하단 고정 네비게이션 */}
         {!standingState.showResultModal && (
           <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-700 p-4 z-40">
-            <div className="max-w-4xl mx-auto flex gap-3">
-              <Button
-                variant="ghost"
-                className="flex-1"
-                onClick={goToPreviousItem}
-              >
-                ← 이전
-              </Button>
-              <Button
-                variant="secondary"
-                className="flex-1"
-                onClick={() => {
-                  if (isAnalyzing) {
-                    if (timerRef.current) clearInterval(timerRef.current);
-                    if (cameraRef.current) {
-                      cameraRef.current.stop();
-                      cameraRef.current = null;
+            <div className="max-w-4xl mx-auto space-y-2">
+              <div className="flex gap-3">
+                <Button
+                  variant="ghost"
+                  className="flex-1"
+                  onClick={goToPreviousItem}
+                >
+                  ← 이전
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={() => {
+                    if (isAnalyzing) {
+                      if (timerRef.current) clearInterval(timerRef.current);
+                      if (cameraRef.current) {
+                        cameraRef.current.stop();
+                        cameraRef.current = null;
+                      }
+                      setIsAnalyzing(false);
+                      resetStandingAnalysis();
+                      setStandingState({
+                        testPhase: 'waiting',
+                        currentState: 'not_standing',
+                        stabilityLevel: 'good',
+                        isStanding: false,
+                        isUsingSupport: false,
+                        standingStartTime: null,
+                        standingDuration: 0,
+                        targetDuration: 120,
+                        supportSeekingCount: 0,
+                        unstableTime: 0,
+                        lostBalance: false,
+                        feedback: { message: '지지물 없이 서 주세요...', type: 'info' },
+                        autoScore: null,
+                        assessmentReport: null,
+                        showResultModal: false,
+                        debug: null
+                      });
                     }
-                    setIsAnalyzing(false);
-                    resetStandingAnalysis();
-                    setStandingState({
-                      testPhase: 'waiting',
-                      currentState: 'not_standing',
-                      stabilityLevel: 'good',
-                      isStanding: false,
-                      isUsingSupport: false,
-                      standingStartTime: null,
-                      standingDuration: 0,
-                      targetDuration: 120,
-                      supportSeekingCount: 0,
-                      unstableTime: 0,
-                      lostBalance: false,
-                      feedback: { message: '지지물 없이 서 주세요...', type: 'info' },
-                      autoScore: null,
-                      assessmentReport: null,
-                      showResultModal: false,
-                      debug: null
-                    });
-                  }
-                }}
-                disabled={!isAnalyzing}
-              >
-                다시 검사
-              </Button>
+                  }}
+                  disabled={!isAnalyzing}
+                >
+                  다시 검사
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={goToNextItem}
+                >
+                  정상 (4점) →
+                </Button>
+              </div>
               <Button
-                variant="secondary"
-                className="flex-1"
-                onClick={goToNextItem}
+                variant="danger"
+                size="sm"
+                fullWidth
+                onClick={emergencyStop}
               >
-                건너뛰기 →
+                🚨 검사 중단 (Emergency)
               </Button>
             </div>
           </div>
@@ -2090,46 +2148,55 @@ function BBSTestPage() {
           </Card>
 
           {/* 하단 여백 (고정 네비게이션 바 공간 확보) */}
-          <div className="h-20"></div>
+          <div className="h-28"></div>
         </div>
       </main>
 
       {/* 하단 고정 네비게이션 */}
       <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-700 p-4 z-40">
-        <div className="max-w-4xl mx-auto flex gap-3">
-          <Button
-            variant="ghost"
-            className="flex-1"
-            onClick={goToPreviousItem}
-            disabled={currentItem === 0}
-          >
-            ← 이전
-          </Button>
-          <Button
-            variant="secondary"
-            className="flex-1"
-            onClick={() => {
-              if (isAnalyzing) {
-                if (timerRef.current) clearInterval(timerRef.current);
-                if (cameraRef.current) {
-                  cameraRef.current.stop();
-                  cameraRef.current = null;
+        <div className="max-w-4xl mx-auto space-y-2">
+          <div className="flex gap-3">
+            <Button
+              variant="ghost"
+              className="flex-1"
+              onClick={goToPreviousItem}
+              disabled={currentItem === 0}
+            >
+              ← 이전
+            </Button>
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={() => {
+                if (isAnalyzing) {
+                  if (timerRef.current) clearInterval(timerRef.current);
+                  if (cameraRef.current) {
+                    cameraRef.current.stop();
+                    cameraRef.current = null;
+                  }
+                  setIsAnalyzing(false);
+                  setItemTimer(0);
                 }
-                setIsAnalyzing(false);
-                setItemTimer(0);
-              }
-            }}
-            disabled={!isAnalyzing}
-          >
-            다시 검사
-          </Button>
+              }}
+              disabled={!isAnalyzing}
+            >
+              다시 검사
+            </Button>
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={goToNextItem}
+            >
+              정상 (4점) →
+            </Button>
+          </div>
           <Button
-            variant="secondary"
-            className="flex-1"
-            onClick={goToNextItem}
-            disabled={currentItem >= 13}
+            variant="danger"
+            size="sm"
+            fullWidth
+            onClick={emergencyStop}
           >
-            건너뛰기 →
+            🚨 검사 중단 (Emergency)
           </Button>
         </div>
       </div>
