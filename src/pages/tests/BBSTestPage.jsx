@@ -916,6 +916,15 @@ function BBSTestPage() {
     console.log('sideVideoRef.current:', sideVideoRef.current);
     console.log('frontVideoRef.current:', frontVideoRef.current);
 
+    // refs가 아직 연결되지 않은 경우 최대 3번 재시도
+    let retryCount = 0;
+    while (retryCount < 3 && ((sideVideoUrl && !sideVideoRef.current) || (frontVideoUrl && !frontVideoRef.current))) {
+      retryCount++;
+      console.log(`Refs not ready (attempt ${retryCount}/3), waiting 200ms...`);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      console.log('After wait - sideRef:', sideVideoRef.current, 'frontRef:', frontVideoRef.current);
+    }
+
     setCameraLoading(true);
 
     try {
