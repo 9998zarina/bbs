@@ -749,22 +749,49 @@ function BBSTestPage() {
     }
 
     const video = videoRef.current;
-    video.src = videoUrl;
-    video.muted = true;
-    video.playsInline = true;
+
+    // 기존 이벤트 리스너 제거
+    video.onloadeddata = null;
+    video.onerror = null;
+    video.onended = null;
 
     console.log(`[${viewType}] Loading video...`);
 
-    // 비디오 로드 대기
+    // 비디오 로드 대기 - 이벤트 리스너를 먼저 설정
     await new Promise((resolve, reject) => {
-      video.onloadeddata = () => {
-        console.log(`[${viewType}] Video loaded successfully`);
+      const timeoutId = setTimeout(() => {
+        console.error(`[${viewType}] Video load timeout`);
+        reject(new Error('Video load timeout'));
+      }, 10000); // 10초 타임아웃
+
+      const handleLoaded = () => {
+        clearTimeout(timeoutId);
+        console.log(`[${viewType}] Video loaded successfully, readyState:`, video.readyState);
+        console.log(`[${viewType}] Video dimensions:`, video.videoWidth, 'x', video.videoHeight);
         resolve();
       };
-      video.onerror = (e) => {
+
+      const handleError = (e) => {
+        clearTimeout(timeoutId);
         console.error(`[${viewType}] Video load error:`, e);
         reject(e);
       };
+
+      // 이미 로드된 경우 바로 resolve
+      if (video.readyState >= 2 && video.src === videoUrl) {
+        console.log(`[${viewType}] Video already loaded`);
+        clearTimeout(timeoutId);
+        resolve();
+        return;
+      }
+
+      video.onloadeddata = handleLoaded;
+      video.onerror = handleError;
+
+      // src 설정 후 load 호출
+      video.src = videoUrl;
+      video.muted = true;
+      video.playsInline = true;
       video.load();
     });
 
@@ -878,8 +905,14 @@ function BBSTestPage() {
     return true;
   }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis]);
 
-  // 양쪽 동영상 순차 분석 초기화
+  // 양쪽 동영상 병렬 분석 초기화
   const initVideoAnalysis = useCallback(async () => {
+    console.log('=== initVideoAnalysis called ===');
+    console.log('sideVideoUrl:', sideVideoUrl);
+    console.log('frontVideoUrl:', frontVideoUrl);
+    console.log('sideVideoRef.current:', sideVideoRef.current);
+    console.log('frontVideoRef.current:', frontVideoRef.current);
+
     setCameraLoading(true);
 
     try {
@@ -893,42 +926,51 @@ function BBSTestPage() {
         frontAnalysisRef.current = null;
       }
 
-      // 측면 영상 초기화 (먼저)
-      let sideResult = null;
+      // 양쪽 영상 병렬 초기화
+      const initPromises = [];
+
       if (sideVideoUrl && sideVideoRef.current) {
-        console.log('Starting side video analysis...', sideVideoUrl);
-        try {
-          sideResult = await initSingleVideoAnalysis(
+        console.log('Queueing side video analysis...');
+        initPromises.push(
+          initSingleVideoAnalysis(
             sideVideoRef, sideCanvasRef, sidePoseRef, sideAnalysisRef,
             sideVideoUrl, setSideVideoProgress, setSideVideoDuration, setIsSideVideoPaused, setSideLandmarks, 'side'
-          );
-          console.log('Side video analysis result:', sideResult);
-        } catch (e) {
-          console.error('Side video init error:', e);
-        }
+          ).then(result => {
+            console.log('Side video analysis result:', result);
+            return { type: 'side', result };
+          }).catch(e => {
+            console.error('Side video init error:', e);
+            return { type: 'side', result: null, error: e };
+          })
+        );
       } else {
         console.log('Side video skipped - URL:', sideVideoUrl, 'Ref:', sideVideoRef.current);
       }
 
-      // 정면 영상 초기화 (그 다음)
-      let frontResult = null;
       if (frontVideoUrl && frontVideoRef.current) {
-        console.log('Starting front video analysis...', frontVideoUrl);
-        try {
-          frontResult = await initSingleVideoAnalysis(
+        console.log('Queueing front video analysis...');
+        initPromises.push(
+          initSingleVideoAnalysis(
             frontVideoRef, frontCanvasRef, frontPoseRef, frontAnalysisRef,
             frontVideoUrl, setFrontVideoProgress, setFrontVideoDuration, setIsFrontVideoPaused, setFrontLandmarks, 'front'
-          );
-          console.log('Front video analysis result:', frontResult);
-        } catch (e) {
-          console.error('Front video init error:', e);
-        }
+          ).then(result => {
+            console.log('Front video analysis result:', result);
+            return { type: 'front', result };
+          }).catch(e => {
+            console.error('Front video init error:', e);
+            return { type: 'front', result: null, error: e };
+          })
+        );
       } else {
         console.log('Front video skipped - URL:', frontVideoUrl, 'Ref:', frontVideoRef.current);
       }
 
+      // 모든 초기화 완료 대기
+      const results = await Promise.all(initPromises);
+      console.log('All video init results:', results);
+
       setCameraLoading(false);
-      return sideResult || frontResult;
+      return results.some(r => r.result);
     } catch (error) {
       console.error('Video analysis init error:', error);
       setCameraLoading(false);
@@ -1733,14 +1775,32 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 양쪽 동영상 뷰 (측면 + 정면 개별 재생) */}
+            {/* 양쪽 동영상 뷰 (측면 + 정면) - Item 1 */}
             <div className="grid grid-cols-2 gap-3">
               {/* 측면 영상 */}
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={sideVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <video
+                    ref={sideVideoRef}
+                    className="absolute inset-0 w-full h-full object-contain"
+                    playsInline
+                    muted
+                    onLoadedData={() => console.log('[Item1-Side] loadeddata')}
+                    onPlay={() => console.log('[Item1-Side] playing')}
+                  />
                   <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
+                  {/* 상태 표시 */}
+                  {sideVideoUrl && cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                      측면 로딩...
+                    </div>
+                  )}
+                  {sideVideoUrl && isAnalyzing && !cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                      {isSideVideoPaused ? '일시정지' : '분석 중'}
+                    </div>
+                  )}
                   {!sideVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
@@ -1785,11 +1845,29 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={frontVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <video
+                    ref={frontVideoRef}
+                    className="absolute inset-0 w-full h-full object-contain"
+                    playsInline
+                    muted
+                    onLoadedData={() => console.log('[Front] loadeddata')}
+                    onPlay={() => console.log('[Front] playing')}
+                  />
                   <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                   {!frontVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
+                    </div>
+                  )}
+                  {/* 상태 표시 */}
+                  {frontVideoUrl && cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                      정면 로딩...
+                    </div>
+                  )}
+                  {frontVideoUrl && isAnalyzing && !cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                      {isFrontVideoPaused ? '일시정지' : '분석 중'}
                     </div>
                   )}
                 </div>
@@ -2226,17 +2304,35 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 양쪽 동영상 뷰 (측면 + 정면 개별 재생) */}
+            {/* 양쪽 동영상 뷰 - Item 2 */}
             <div className="grid grid-cols-2 gap-3">
               {/* 측면 영상 */}
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={sideVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <video
+                    ref={sideVideoRef}
+                    className="absolute inset-0 w-full h-full object-contain"
+                    playsInline
+                    muted
+                    onLoadedData={() => console.log('[Item2-Side] loadeddata')}
+                    onPlay={() => console.log('[Item2-Side] playing')}
+                  />
                   <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                   {!sideVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
+                    </div>
+                  )}
+                  {/* 상태 표시 */}
+                  {sideVideoUrl && cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                      측면 로딩...
+                    </div>
+                  )}
+                  {sideVideoUrl && isAnalyzing && !cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                      {isSideVideoPaused ? '일시정지' : '분석 중'}
                     </div>
                   )}
                 </div>
@@ -2278,11 +2374,29 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video ref={frontVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                  <video
+                    ref={frontVideoRef}
+                    className="absolute inset-0 w-full h-full object-contain"
+                    playsInline
+                    muted
+                    onLoadedData={() => console.log('[Front] loadeddata')}
+                    onPlay={() => console.log('[Front] playing')}
+                  />
                   <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                   {!frontVideoUrl && (
                     <div className="absolute inset-0 flex items-center justify-center">
                       <span className="text-slate-500 text-sm">영상 없음</span>
+                    </div>
+                  )}
+                  {/* 상태 표시 */}
+                  {frontVideoUrl && cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                      정면 로딩...
+                    </div>
+                  )}
+                  {frontVideoUrl && isAnalyzing && !cameraLoading && (
+                    <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                      {isFrontVideoPaused ? '일시정지' : '분석 중'}
                     </div>
                   )}
                 </div>
@@ -2701,17 +2815,35 @@ function BBSTestPage() {
             </div>
           </Card>
 
-          {/* 양쪽 동영상 뷰 (측면 + 정면 개별 재생) */}
+          {/* 양쪽 동영상 뷰 - 일반 항목 */}
           <div className="grid grid-cols-2 gap-3">
             {/* 측면 영상 */}
             <div className="space-y-2">
               <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
               <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                <video ref={sideVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
+                <video
+                    ref={sideVideoRef}
+                    className="absolute inset-0 w-full h-full object-contain"
+                    playsInline
+                    muted
+                    onLoadedData={() => console.log('[General-Side] loadeddata')}
+                    onPlay={() => console.log('[General-Side] playing')}
+                  />
                 <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
                 {!sideVideoUrl && (
                   <div className="absolute inset-0 flex items-center justify-center">
                     <span className="text-slate-500 text-sm">영상 없음</span>
+                  </div>
+                )}
+                {/* 상태 표시 */}
+                {sideVideoUrl && cameraLoading && (
+                  <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                    측면 로딩...
+                  </div>
+                )}
+                {sideVideoUrl && isAnalyzing && !cameraLoading && (
+                  <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                    {isSideVideoPaused ? '일시정지' : '분석 중'}
                   </div>
                 )}
               </div>
