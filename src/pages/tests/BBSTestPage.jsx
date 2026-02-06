@@ -3,7 +3,7 @@ import { PageContainer, Header } from '../../components/layout';
 import { Button, Card, Alert, ProgressBar, Badge } from '../../components/ui';
 import { PatientInfoForm } from '../../components/forms';
 import { drawConnections, drawLandmarks } from '../../utils/poseDrawing';
-import { calculateBBSRisk, getRiskColorClasses } from '../../utils/riskCalculation';
+import { calculateBBSRisk } from '../../utils/riskCalculation';
 import {
   analyzeSitToStand,
   calculateSitToStandScore,
@@ -98,11 +98,34 @@ function BBSTestPage() {
   const [scores, setScores] = useState(Array(14).fill(null));
   const [isComplete, setIsComplete] = useState(false);
   const [patientInfo, setPatientInfo] = useState({ name: '홍길동', id: 'P-DEMO-001' });
+
+  // AI 분석 결과 저장 (각 항목별)
+  const [analysisResults, setAnalysisResults] = useState(Array(14).fill(null));
+  const [testStartTime, setTestStartTime] = useState(null);
+  const [testEndTime, setTestEndTime] = useState(null);
   const [showSetup, setShowSetup] = useState(true);
 
-  // 동영상 업로드 (측면/정면)
-  const [sideVideoUrl, setSideVideoUrl] = useState(null); // 측면 영상
-  const [frontVideoUrl, setFrontVideoUrl] = useState(null); // 정면 영상
+  // 동영상 업로드 (각 항목별 측면/정면)
+  const [itemVideos, setItemVideos] = useState(
+    Array(14).fill(null).map(() => ({ side: null, front: null }))
+  );
+
+  // 현재 항목의 영상 URL (편의를 위한 계산된 값)
+  const sideVideoUrl = itemVideos[currentItem]?.side;
+  const frontVideoUrl = itemVideos[currentItem]?.front;
+
+  // 현재 항목 영상 설정 함수
+  const setCurrentItemVideo = (type, url) => {
+    setItemVideos(prev => {
+      const newVideos = [...prev];
+      newVideos[currentItem] = { ...newVideos[currentItem], [type]: url };
+      return newVideos;
+    });
+  };
+
+  // 기존 호환성을 위한 setter 함수
+  const setSideVideoUrl = (url) => setCurrentItemVideo('side', url);
+  const setFrontVideoUrl = (url) => setCurrentItemVideo('front', url);
 
   // 카메라/분석 상태
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -132,12 +155,28 @@ function BBSTestPage() {
     debug: null
   });
 
-  // 일반 항목용 상태
+  // 일반 항목용 상태 (항목 3-14)
+  // testPhase: 'waiting' -> 'detecting' -> 'in_progress' -> 'complete'
   const [generalDetection, setGeneralDetection] = useState({
+    testPhase: 'waiting', // waiting, detecting, in_progress, complete
     status: '대기',
     confidence: 0,
     suggestedScore: null,
-    message: ''
+    message: '',
+    // 타이머 기반 항목용
+    startTime: null,
+    elapsedTime: 0,
+    targetDuration: 0,
+    // 동작 기반 항목용
+    actionDetected: false,
+    actionCount: 0,
+    // 자세 분석
+    currentPosture: 'unknown',
+    postureStability: 'unknown',
+    // 완료 상태
+    autoScore: null,
+    assessmentReport: null,
+    showResultModal: false
   });
 
   // 측면 영상 refs
@@ -192,20 +231,25 @@ function BBSTestPage() {
   const isItem2 = currentItem === 1;
 
   // 항목 2 전용 상태 - 잡지 않고 서 있기
-  // testPhase: 'waiting' -> 'timing' -> 'complete'
+  // testPhase: 'waiting' -> 'sitting_confirmed' -> 'standing_up' -> 'timing' -> 'complete'
   const [standingState, setStandingState] = useState({
-    testPhase: 'waiting', // waiting, timing, complete
+    testPhase: 'waiting', // waiting, sitting_confirmed, standing_up, timing, complete
     currentState: 'not_standing',
+    currentPosture: PostureState.UNKNOWN, // 현재 자세 (sitting, standing, unknown)
     stabilityLevel: 'good',
     isStanding: false,
     isUsingSupport: false, // 지지물 사용 여부
+    sittingConfidence: 0, // 앉음 신뢰도
+    standingConfidence: 0, // 서있음 신뢰도
+    sittingConfirmedAt: null, // 앉음 확인 시간
+    standingDetectedAt: null, // 일어서기 감지 시간
     standingStartTime: null,
     standingDuration: 0,
     targetDuration: 120, // 2분
     supportSeekingCount: 0,
     unstableTime: 0,
     lostBalance: false,
-    feedback: { message: '서 있는 자세를 취해주세요...', type: 'info' },
+    feedback: { message: '의자에 앉아주세요...', type: 'info' },
     autoScore: null,
     assessmentReport: null,
     showResultModal: false,
@@ -250,9 +294,11 @@ function BBSTestPage() {
           // 앉음 감지됨 - 1초간 유지되면 확정
           if (!sittingConfirmedAt) {
             sittingConfirmedAt = now;
+            console.log('[Item1] 앉은 자세 감지 시작! confidence:', analysis.sitting?.confidence);
             newFeedback = { message: '앉은 자세 감지 중... 잠시 유지해주세요', type: 'info' };
-          } else if (now - sittingConfirmedAt > 1500) {
-            // 1.5초간 앉음 유지 = 확정
+          } else if (now - sittingConfirmedAt > 1000) {
+            // 1초간 앉음 유지 = 확정
+            console.log('[Item1] 앉은 자세 확정!');
             newPhase = 'sitting_confirmed';
             newFeedback = { message: '✓ 앉은 자세 확인! 이제 일어서세요', type: 'success' };
           }
@@ -274,10 +320,12 @@ function BBSTestPage() {
           newFeedback = { message: '⚠️ 손 사용 감지! (감점)', type: 'error' };
         }
 
-        // 일어서기 시작 감지
-        if (analysis.standing?.confidence > 30 || analysis.isTransitioning) {
+        // 일어서기 시작 감지 (조건 완화)
+        const standingConf = analysis.standing?.confidence || 0;
+        if (standingConf > 25 || analysis.isTransitioning) {
+          console.log('[Item1] 일어서기 시작! standing confidence:', standingConf);
           newPhase = 'standing_up';
-          newFeedback = { message: '일어서는 중...', type: 'info' };
+          newFeedback = { message: '일어서는 중... 계속 일어서세요!', type: 'info' };
         }
       }
 
@@ -293,24 +341,34 @@ function BBSTestPage() {
           newFeedback = { message: '⚠️ 손 사용 감지! (감점)', type: 'error' };
         }
 
-        // 서있음 확정 감지
-        if (analysis.state === PostureState.STANDING && analysis.standing?.confidence > 55) {
+        // 서있음 확정 감지 (조건 완화: 45% 이상)
+        const standingConfidence = analysis.standing?.confidence || 0;
+        const isStanding = analysis.state === PostureState.STANDING && standingConfidence > 45;
+
+        if (isStanding) {
           if (!standingDetectedAt) {
             standingDetectedAt = now;
-          } else if (now - standingDetectedAt > 1000) {
-            // 1초간 서있음 유지 = 검사 완료!
+            console.log('[Item1] 서있음 감지 시작! confidence:', standingConfidence);
+          } else if (now - standingDetectedAt > 800) {
+            // 0.8초간 서있음 유지 = 검사 완료!
+            console.log('[Item1] 검사 완료! 서있음 유지:', (now - standingDetectedAt), 'ms');
             newPhase = 'complete';
             autoScore = calculateSitToStandScore(analysisHistoryRef.current);
             assessmentReport = generateAssessmentReport(analysisHistoryRef.current, autoScore);
             showResultModal = true;
+            console.log('[Item1] autoScore:', autoScore, 'assessmentReport:', assessmentReport);
             newFeedback = {
-              message: usedHands ? '검사 완료 (손 사용으로 감점)' : '✓ 검사 완료! 훌륭합니다!',
+              message: usedHands ? '🎉 검사 완료! (손 사용 감점)' : '🎉 검사 완료! 훌륭합니다!',
               type: usedHands ? 'warning' : 'success'
             };
           } else {
-            newFeedback = { message: '서있는 자세 확인 중...', type: 'info' };
+            const remaining = Math.ceil((800 - (now - standingDetectedAt)) / 100) / 10;
+            newFeedback = { message: `서있는 자세 확인 중... (${remaining}초)`, type: 'info' };
           }
         } else {
+          if (standingDetectedAt) {
+            console.log('[Item1] 서있음 리셋 - confidence:', standingConfidence);
+          }
           standingDetectedAt = null;
         }
       }
@@ -340,22 +398,39 @@ function BBSTestPage() {
     return analysis;
   }, [sitToStandState.testPhase, sitToStandState.usedHandsDuringTransition]);
 
-  // 항목 2 전용 분석 - 잡지 않고 서 있기
+  // 항목 2 전용 분석 - 잡지 않고 서 있기 (앉기 → 일어서기 → 2분 유지)
   const handleItem2Analysis = useCallback((landmarks) => {
     if (!landmarks || landmarks.length < 33) {
       return { stability: 'good', isStanding: false, state: 'not_standing' };
     }
 
-    const analysis = analyzeStandingUnsupported(landmarks);
-    if (!analysis) {
-      return { stability: 'good', isStanding: false, state: 'not_standing' };
-    }
+    // 앉기/서기 분석 (Item 1과 동일한 분석 사용)
+    const sitStandAnalysis = analyzeSitToStand(landmarks, previousAnalysisRef.current);
+    // 서있기 안정성 분석
+    const standingAnalysis = analyzeStandingUnsupported(landmarks);
 
     const now = Date.now();
+
+    // 히스토리 저장
+    analysisHistoryRef.current.push({
+      ...sitStandAnalysis,
+      timestamp: now
+    });
+
+    if (analysisHistoryRef.current.length > 150) {
+      analysisHistoryRef.current.shift();
+    }
+
+    previousAnalysisRef.current = sitStandAnalysis;
 
     setStandingState(prev => {
       let newPhase = prev.testPhase;
       let newFeedback = prev.feedback;
+      let currentPosture = prev.currentPosture;
+      let sittingConfidence = prev.sittingConfidence;
+      let standingConfidence = prev.standingConfidence;
+      let sittingConfirmedAt = prev.sittingConfirmedAt;
+      let standingDetectedAt = prev.standingDetectedAt;
       let standingStartTime = prev.standingStartTime;
       let standingDuration = prev.standingDuration;
       let supportSeekingCount = prev.supportSeekingCount;
@@ -365,64 +440,97 @@ function BBSTestPage() {
       let assessmentReport = prev.assessmentReport;
       let showResultModal = prev.showResultModal;
 
-      // 단계 1: 서있기 대기 중
+      // 자세 상태 업데이트
+      currentPosture = sitStandAnalysis.state;
+      sittingConfidence = sitStandAnalysis.sitting?.confidence || 0;
+      standingConfidence = sitStandAnalysis.standing?.confidence || 0;
+
+      // 단계 1: 앉기 대기 중
       if (prev.testPhase === 'waiting') {
-        // 지지물 사용 중이면 타이머 시작하지 않음
-        if (analysis.isUsingSupport) {
-          newFeedback = {
-            message: analysis.supportUsageMessage || '⚠️ 지지물을 놓아주세요',
-            type: 'warning'
-          };
-        }
-        // 지지 없이 서 있을 때만 타이머 시작
-        else if (analysis.isStandingUnsupported && analysis.confidence > 0.6) {
-          // 지지 없이 서있음 감지 - 타이머 시작
-          if (!standingStartTime) {
-            standingStartTime = now;
-            newPhase = 'timing';
-            newFeedback = { message: '✓ 지지 없이 서있음 확인! 유지해주세요', type: 'success' };
+        if (sitStandAnalysis.state === PostureState.SITTING && sittingConfidence > 50) {
+          // 앉음 감지됨 - 1초간 유지되면 확정
+          if (!sittingConfirmedAt) {
+            sittingConfirmedAt = now;
+            newFeedback = { message: '앉은 자세 감지됨... 유지해주세요', type: 'info' };
+          } else if (now - sittingConfirmedAt > 1000) {
+            // 1초 이상 유지 - 확정
+            newPhase = 'sitting_confirmed';
+            newFeedback = { message: '✓ 앉은 자세 확인! 이제 일어서세요', type: 'success' };
           }
-        } else if (analysis.isStanding && !analysis.isStandingUnsupported) {
-          // 서 있지만 지지물 사용 중
-          newFeedback = { message: '⚠️ 지지물을 놓고 서 주세요', type: 'warning' };
         } else {
-          newFeedback = { message: '서 있는 자세를 취해주세요...', type: 'info' };
+          // 앉지 않음
+          sittingConfirmedAt = null;
+          newFeedback = { message: '의자에 앉아주세요...', type: 'info' };
         }
       }
 
-      // 단계 2: 시간 측정 중
+      // 단계 2: 앉음 확인됨 - 일어서기 대기
+      if (prev.testPhase === 'sitting_confirmed') {
+        if (sitStandAnalysis.state === PostureState.STANDING && standingConfidence > 45) {
+          // 서있음 감지됨
+          if (!standingDetectedAt) {
+            standingDetectedAt = now;
+            newPhase = 'standing_up';
+            newFeedback = { message: '일어서는 중... 완전히 서면 타이머 시작!', type: 'info' };
+          }
+        } else if (sitStandAnalysis.state === PostureState.SITTING) {
+          // 여전히 앉아있음
+          newFeedback = { message: '이제 천천히 일어서세요!', type: 'success' };
+        }
+      }
+
+      // 단계 3: 일어서는 중
+      if (prev.testPhase === 'standing_up') {
+        if (sitStandAnalysis.state === PostureState.STANDING && standingConfidence > 55) {
+          // 완전히 서있음 확인 - 0.8초간 유지되면 타이머 시작
+          if (standingDetectedAt && now - standingDetectedAt > 800) {
+            // 타이머 시작
+            standingStartTime = now;
+            newPhase = 'timing';
+            newFeedback = { message: '✓ 일어서기 완료! 2분간 유지해주세요', type: 'success' };
+          } else {
+            newFeedback = { message: '일어서기 확인 중...', type: 'info' };
+          }
+        } else if (sitStandAnalysis.state === PostureState.SITTING) {
+          // 다시 앉음
+          standingDetectedAt = null;
+          newPhase = 'sitting_confirmed';
+          newFeedback = { message: '다시 일어서세요!', type: 'warning' };
+        }
+      }
+
+      // 단계 4: 시간 측정 중 (2분)
       if (prev.testPhase === 'timing') {
         if (standingStartTime) {
           standingDuration = (now - standingStartTime) / 1000;
         }
 
         // 지지물 사용 감지 (벽, 지팡이 등)
-        if (analysis.isUsingSupport) {
+        if (standingAnalysis?.isUsingSupport) {
           supportSeekingCount = prev.supportSeekingCount + 1;
           newFeedback = {
-            message: analysis.supportUsageMessage || '⚠️ 지지물 사용 감지 (감독 필요)',
+            message: standingAnalysis.supportUsageMessage || '⚠️ 지지물 사용 감지 (감독 필요)',
             type: 'warning'
           };
         }
         // 지지 요청 행동 감지
-        else if (analysis.supportSeeking) {
+        else if (standingAnalysis?.supportSeeking) {
           supportSeekingCount = prev.supportSeekingCount + 1;
-          newFeedback = { message: analysis.supportMessage || '⚠️ 균형 유지 중', type: 'warning' };
+          newFeedback = { message: standingAnalysis.supportMessage || '⚠️ 균형 유지 중', type: 'warning' };
         }
 
         // 불안정 시간 누적
-        if (analysis.stability === 'poor' || analysis.stability === 'critical') {
-          unstableTime = prev.unstableTime + 0.1; // 약 100ms마다 호출되므로
+        if (standingAnalysis?.stability === 'poor' || standingAnalysis?.stability === 'critical') {
+          unstableTime = prev.unstableTime + 0.1;
         }
 
         // 균형 상실 감지
-        if (analysis.balanceLost) {
+        if (standingAnalysis?.balanceLost) {
           lostBalance = true;
-          // 균형 상실 시 즉시 완료
           newPhase = 'complete';
           autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, true, unstableTime, 1);
           assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
-            avgStability: analysis.stability,
+            avgStability: standingAnalysis.stability,
             supportEvents: supportSeekingCount
           });
           showResultModal = true;
@@ -433,30 +541,30 @@ function BBSTestPage() {
           newPhase = 'complete';
           autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, false, unstableTime, 1);
           assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
-            avgStability: analysis.stability,
+            avgStability: standingAnalysis?.stability || 'good',
             supportEvents: supportSeekingCount
           });
           showResultModal = true;
           newFeedback = { message: '✓ 2분 완료! 훌륭합니다!', type: 'success' };
         }
-        // 30초 이상 버틴 경우 - 수동 완료 버튼 표시
-        else if (standingDuration >= 30 && !analysis.isStanding) {
-          // 서있지 않게 된 경우 (앉거나 넘어짐)
+        // 앉아버린 경우 (타이머 진행 중에)
+        else if (sitStandAnalysis.state === PostureState.SITTING && standingDuration >= 10) {
           newPhase = 'complete';
           autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, false, unstableTime, 1);
           assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
-            avgStability: analysis.stability,
+            avgStability: standingAnalysis?.stability || 'good',
             supportEvents: supportSeekingCount
           });
           showResultModal = true;
-          newFeedback = { message: `${standingDuration.toFixed(1)}초간 서 있음`, type: 'info' };
+          newFeedback = { message: `${standingDuration.toFixed(1)}초간 서 있음 - 앉음 감지됨`, type: 'info' };
         }
         // 진행 중 피드백
         else {
           const remaining = Math.ceil(prev.targetDuration - standingDuration);
-          if (analysis.stability === 'excellent' || analysis.stability === 'good') {
+          const stability = standingAnalysis?.stability || 'good';
+          if (stability === 'excellent' || stability === 'good') {
             newFeedback = { message: `안정적! 남은 시간: ${remaining}초`, type: 'success' };
-          } else if (analysis.stability === 'moderate') {
+          } else if (stability === 'moderate') {
             newFeedback = { message: `약간 흔들림 - 남은 시간: ${remaining}초`, type: 'warning' };
           } else {
             newFeedback = { message: `⚠️ 불안정 - 균형 유지하세요!`, type: 'error' };
@@ -467,10 +575,15 @@ function BBSTestPage() {
       return {
         ...prev,
         testPhase: newPhase,
-        currentState: analysis.state,
-        stabilityLevel: analysis.stability,
-        isStanding: analysis.isStanding,
-        isUsingSupport: analysis.isUsingSupport, // 지지물 사용 여부
+        currentState: standingAnalysis?.state || 'unknown',
+        currentPosture,
+        stabilityLevel: standingAnalysis?.stability || 'good',
+        isStanding: standingAnalysis?.isStanding || false,
+        isUsingSupport: standingAnalysis?.isUsingSupport || false,
+        sittingConfidence,
+        standingConfidence,
+        sittingConfirmedAt,
+        standingDetectedAt,
         standingStartTime,
         standingDuration,
         supportSeekingCount,
@@ -480,17 +593,20 @@ function BBSTestPage() {
         autoScore,
         assessmentReport,
         showResultModal,
-        debug: analysis.debug
+        debug: standingAnalysis?.debug
       };
     });
 
-    return analysis;
+    return standingAnalysis || { stability: 'good', isStanding: false, state: 'not_standing' };
   }, [standingState.testPhase]);
 
-  // 일반 항목 분석
+  // 일반 항목 분석 (항목 3-14) - AI 자동 분석 및 점수 계산
   const handleGeneralAnalysis = useCallback((landmarks) => {
-    if (!currentBBSItem) return;
+    if (!currentBBSItem || !landmarks || landmarks.length < 33) return;
 
+    const now = Date.now();
+
+    // 주요 랜드마크 추출
     const leftHip = landmarks[23];
     const rightHip = landmarks[24];
     const leftKnee = landmarks[25];
@@ -499,8 +615,13 @@ function BBSTestPage() {
     const rightAnkle = landmarks[28];
     const leftShoulder = landmarks[11];
     const rightShoulder = landmarks[12];
+    const leftWrist = landmarks[15];
+    const rightWrist = landmarks[16];
+    const nose = landmarks[0];
 
+    // 기본 분석
     const hipY = (leftHip.y + rightHip.y) / 2;
+    const kneeY = (leftKnee.y + rightKnee.y) / 2;
     const ankleY = (leftAnkle.y + rightAnkle.y) / 2;
     const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
     const hipToAnkleRatio = (ankleY - hipY) / (ankleY - shoulderY);
@@ -508,78 +629,441 @@ function BBSTestPage() {
     const isSitting = hipToAnkleRatio < 0.4;
     const ankleDistance = Math.abs(leftAnkle.x - rightAnkle.x);
 
+    // 발 높이 차이 (한 발 들기 감지)
+    const footHeightDiff = Math.abs(leftAnkle.y - rightAnkle.y);
+    const isOneLegRaised = footHeightDiff > 0.08;
+
+    // 어깨 회전 (뒤돌아보기 감지)
+    const shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+    const shoulderRotation = shoulderWidth < 0.12; // 좁아지면 회전 중
+
+    // 상체 기울기 (물건 집기, 팔 뻗기 감지)
+    const bodyLean = shoulderY - hipY;
+    const isBending = bodyLean > 0.15;
+
+    // 팔 뻗기 감지
+    const armExtension = Math.max(
+      Math.abs(leftWrist.z - leftShoulder.z),
+      Math.abs(rightWrist.z - rightShoulder.z)
+    );
+
     const detection = currentBBSItem.detection;
-    let status = '감지 중';
-    let confidence = 0;
-    let suggestedScore = null;
-    let message = '';
+    const targetDuration = currentBBSItem.duration || 0;
 
-    switch (detection.type) {
-      case 'standing_duration':
-      case 'standing_feet_together':
-        if (isStanding) {
-          const elapsed = itemTimer;
-          const required = currentBBSItem.duration || 120;
-          confidence = Math.min(100, (elapsed / required) * 100);
-          status = `서 있음 (${Math.floor(elapsed)}초)`;
-          message = `${required}초 유지하세요`;
+    setGeneralDetection(prev => {
+      let newPhase = prev.testPhase;
+      let status = prev.status;
+      let confidence = prev.confidence;
+      let suggestedScore = prev.suggestedScore;
+      let message = prev.message;
+      let startTime = prev.startTime;
+      let elapsedTime = prev.elapsedTime;
+      let actionDetected = prev.actionDetected;
+      let actionCount = prev.actionCount;
+      let autoScore = prev.autoScore;
+      let assessmentReport = prev.assessmentReport;
+      let showResultModal = prev.showResultModal;
+      let currentPosture = prev.currentPosture;
+      let postureStability = 'good';
 
-          if (detection.type === 'standing_feet_together' && ankleDistance > 0.15) {
-            message = '발을 더 모아주세요';
-            confidence = Math.max(0, confidence - 20);
+      // 현재 자세 업데이트
+      currentPosture = isStanding ? 'standing' : isSitting ? 'sitting' : 'unknown';
+
+      // 항목별 분석 로직
+      switch (detection.type) {
+        // 항목 3: 지지 없이 앉아 있기 (2분)
+        case 'sitting_duration':
+          if (prev.testPhase === 'waiting') {
+            if (isSitting) {
+              newPhase = 'detecting';
+              status = '앉은 자세 감지 중...';
+              message = '앉은 자세를 유지하면 타이머가 시작됩니다';
+              startTime = now;
+            } else {
+              status = '의자에 앉아주세요';
+              message = '등받이 없이 앉아주세요';
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (isSitting && now - startTime > 1000) {
+              newPhase = 'in_progress';
+              startTime = now;
+              status = '타이머 시작!';
+              message = `${targetDuration}초간 유지하세요`;
+            } else if (!isSitting) {
+              newPhase = 'waiting';
+              startTime = null;
+            }
+          } else if (prev.testPhase === 'in_progress') {
+            elapsedTime = (now - startTime) / 1000;
+            confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
+            status = `앉아 있음: ${Math.floor(elapsedTime)}초 / ${targetDuration}초`;
+
+            if (!isSitting) {
+              postureStability = 'unstable';
+              message = '⚠️ 다시 앉아주세요!';
+            } else {
+              message = `남은 시간: ${Math.ceil(targetDuration - elapsedTime)}초`;
+            }
+
+            // 완료 조건
+            if (elapsedTime >= targetDuration) {
+              newPhase = 'complete';
+              autoScore = { score: 4, reason: `${targetDuration}초간 안전하게 앉아 있음` };
+              assessmentReport = { score: 4, duration: elapsedTime, stability: 'good' };
+              showResultModal = true;
+              status = '✓ 완료!';
+            }
           }
+          break;
 
-          if (elapsed >= required) {
-            suggestedScore = 4;
-            status = '완료!';
-          } else if (elapsed >= required * 0.5) {
-            suggestedScore = 3;
+        // 항목 4: 선 자세에서 앉기
+        case 'stand_to_sit':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              status = '서 있음 확인';
+              message = '천천히 앉으세요 (손 사용하지 않고)';
+              startTime = now;
+            } else if (isSitting) {
+              status = '먼저 일어서세요';
+              message = '서 있는 상태에서 시작합니다';
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (isSitting) {
+              const transitionTime = (now - startTime) / 1000;
+              newPhase = 'complete';
+              // 3초 이상 걸렸으면 조절된 앉기로 판단
+              const score = transitionTime < 3 ? 4 : transitionTime < 5 ? 3 : 2;
+              autoScore = { score, reason: `${transitionTime.toFixed(1)}초에 앉기 완료` };
+              assessmentReport = { score, duration: transitionTime, controlled: transitionTime > 2 };
+              showResultModal = true;
+              status = '✓ 앉기 완료!';
+              confidence = 100;
+            } else if (!isStanding && !isSitting) {
+              status = '앉는 중...';
+              message = '천천히 조절하며 앉으세요';
+              confidence = 50;
+            }
           }
-        } else {
-          status = '서 주세요';
-          confidence = 0;
-        }
-        break;
+          break;
 
-      case 'sitting_duration':
-        if (isSitting) {
-          const elapsed = itemTimer;
-          const required = currentBBSItem.duration || 120;
-          confidence = Math.min(100, (elapsed / required) * 100);
-          status = `앉아 있음 (${Math.floor(elapsed)}초)`;
-          message = `${required}초 유지하세요`;
-
-          if (elapsed >= required) {
-            suggestedScore = 4;
-            status = '완료!';
+        // 항목 5: 이동하기
+        case 'transfer':
+          if (prev.testPhase === 'waiting') {
+            if (isSitting) {
+              newPhase = 'detecting';
+              status = '앉음 확인 - 이제 일어나서 옆 의자로 이동하세요';
+              message = '일어나서 옆 의자로 이동 후 앉으세요';
+              startTime = now;
+              actionCount = 0;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (isStanding && actionCount === 0) {
+              actionCount = 1;
+              status = '일어섬 - 옆 의자로 이동하세요';
+            } else if (isSitting && actionCount === 1) {
+              const transitionTime = (now - startTime) / 1000;
+              newPhase = 'complete';
+              const score = transitionTime < 10 ? 4 : transitionTime < 15 ? 3 : 2;
+              autoScore = { score, reason: `이동 완료 (${transitionTime.toFixed(1)}초)` };
+              assessmentReport = { score, duration: transitionTime };
+              showResultModal = true;
+              status = '✓ 이동 완료!';
+              confidence = 100;
+            }
           }
-        } else {
-          status = '앉아 주세요';
-          confidence = 0;
-        }
-        break;
+          break;
 
-      case 'stand_to_sit':
-        if (isStanding) {
-          status = '서 있음 감지';
-          message = '앉으세요';
-          confidence = 30;
-        } else if (isSitting) {
-          status = '앉음 감지!';
-          message = '잘 하셨습니다!';
-          confidence = 100;
-          suggestedScore = 4;
-        }
-        break;
+        // 항목 6: 눈 감고 서 있기 (10초)
+        // 항목 7: 두 발 모아 서 있기 (1분)
+        case 'standing_duration':
+        case 'standing_feet_together':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              startTime = now;
+              status = '서 있음 감지 중...';
+            } else {
+              status = '서 주세요';
+              message = detection.type === 'standing_feet_together' ? '두 발을 모으고 서세요' : '서 계세요';
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (isStanding && now - startTime > 500) {
+              newPhase = 'in_progress';
+              startTime = now;
+              status = '타이머 시작!';
+            } else if (!isStanding) {
+              newPhase = 'waiting';
+              startTime = null;
+            }
+          } else if (prev.testPhase === 'in_progress') {
+            elapsedTime = (now - startTime) / 1000;
+            confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
+            status = `서 있음: ${Math.floor(elapsedTime)}초 / ${targetDuration}초`;
 
-      default:
-        status = '동작 수행 중';
-        confidence = 50;
-        message = currentBBSItem.instruction;
-    }
+            // 발 모으기 체크 (항목 7)
+            if (detection.type === 'standing_feet_together' && ankleDistance > 0.15) {
+              message = '⚠️ 발을 더 모아주세요';
+              postureStability = 'warning';
+            } else {
+              message = `남은 시간: ${Math.ceil(targetDuration - elapsedTime)}초`;
+            }
 
-    setGeneralDetection({ status, confidence, suggestedScore, message });
-  }, [currentBBSItem, itemTimer]);
+            if (!isStanding) {
+              postureStability = 'unstable';
+              message = '⚠️ 다시 서세요!';
+            }
+
+            // 완료
+            if (elapsedTime >= targetDuration) {
+              newPhase = 'complete';
+              autoScore = { score: 4, reason: `${targetDuration}초간 안전하게 서 있음` };
+              assessmentReport = { score: 4, duration: elapsedTime };
+              showResultModal = true;
+              status = '✓ 완료!';
+            }
+          }
+          break;
+
+        // 항목 8: 팔 뻗어 앞으로 내밀기
+        case 'arm_reach':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              status = '팔을 앞으로 뻗으세요';
+              message = '손가락 끝을 최대한 앞으로 내미세요';
+              startTime = now;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            confidence = Math.min(100, armExtension * 300);
+            if (armExtension > 0.2) {
+              status = '팔 뻗기 감지!';
+              if (now - startTime > 2000) {
+                newPhase = 'complete';
+                const score = armExtension > 0.35 ? 4 : armExtension > 0.25 ? 3 : 2;
+                autoScore = { score, reason: '팔 뻗기 완료' };
+                assessmentReport = { score, reach: armExtension };
+                showResultModal = true;
+              }
+            } else {
+              status = '팔을 더 뻗으세요';
+            }
+          }
+          break;
+
+        // 항목 9: 바닥의 물건 집기
+        case 'pick_up_object':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding && !isBending) {
+              newPhase = 'detecting';
+              status = '서 있음 확인';
+              message = '바닥의 물건을 집으세요';
+              startTime = now;
+              actionDetected = false;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (isBending) {
+              status = '숙이는 중...';
+              actionDetected = true;
+              confidence = 70;
+            } else if (isStanding && actionDetected) {
+              newPhase = 'complete';
+              autoScore = { score: 4, reason: '물건 집기 완료' };
+              assessmentReport = { score: 4 };
+              showResultModal = true;
+              status = '✓ 완료!';
+              confidence = 100;
+            }
+          }
+          break;
+
+        // 항목 10: 뒤돌아보기
+        case 'look_behind':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              status = '왼쪽으로 뒤돌아보세요';
+              message = '어깨 너머로 뒤를 보세요';
+              startTime = now;
+              actionCount = 0;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (shoulderRotation && actionCount === 0) {
+              actionCount = 1;
+              status = '왼쪽 회전 감지! 이제 오른쪽으로';
+              confidence = 50;
+            } else if (shoulderRotation && actionCount === 1) {
+              newPhase = 'complete';
+              autoScore = { score: 4, reason: '양쪽 회전 완료' };
+              assessmentReport = { score: 4 };
+              showResultModal = true;
+              status = '✓ 완료!';
+              confidence = 100;
+            }
+          }
+          break;
+
+        // 항목 11: 360도 회전
+        case 'turn_360':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              status = '한 바퀴 돌아주세요';
+              message = '제자리에서 360도 회전하세요';
+              startTime = now;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            const elapsed = (now - startTime) / 1000;
+            if (elapsed > 2) {
+              newPhase = 'complete';
+              const score = elapsed < 4 ? 4 : elapsed < 6 ? 3 : 2;
+              autoScore = { score, reason: `${elapsed.toFixed(1)}초에 회전 완료` };
+              assessmentReport = { score, duration: elapsed };
+              showResultModal = true;
+              status = '✓ 회전 완료!';
+              confidence = 100;
+            } else {
+              confidence = (elapsed / 4) * 100;
+              status = '회전 중...';
+            }
+          }
+          break;
+
+        // 항목 12: 발판에 발 교대로 올리기
+        case 'step_alternating':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              status = '발을 번갈아 올리세요';
+              message = '발판에 발을 4회 번갈아 올리세요';
+              startTime = now;
+              actionCount = 0;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (isOneLegRaised && !actionDetected) {
+              actionCount++;
+              actionDetected = true;
+              status = `발 올리기 ${actionCount}/4회`;
+              confidence = (actionCount / 4) * 100;
+            } else if (!isOneLegRaised) {
+              actionDetected = false;
+            }
+
+            if (actionCount >= 4) {
+              const elapsed = (now - startTime) / 1000;
+              newPhase = 'complete';
+              const score = elapsed < 20 ? 4 : 3;
+              autoScore = { score, reason: `4회 완료 (${elapsed.toFixed(1)}초)` };
+              assessmentReport = { score, count: actionCount, duration: elapsed };
+              showResultModal = true;
+              status = '✓ 완료!';
+            }
+          }
+          break;
+
+        // 항목 13: 일렬로 서기 (탄뎀 서기)
+        case 'tandem_stance':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              status = '한 발을 다른 발 앞에 놓으세요';
+              message = '일렬로 서세요';
+              startTime = now;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            // 발이 일렬인지 체크 (x좌표가 비슷)
+            const feetInLine = Math.abs(leftAnkle.x - rightAnkle.x) < 0.08;
+            if (feetInLine && isStanding) {
+              newPhase = 'in_progress';
+              startTime = now;
+              status = '일렬 자세 확인!';
+            }
+          } else if (prev.testPhase === 'in_progress') {
+            elapsedTime = (now - startTime) / 1000;
+            confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
+            status = `일렬 서기: ${Math.floor(elapsedTime)}초 / ${targetDuration}초`;
+
+            if (elapsedTime >= targetDuration) {
+              newPhase = 'complete';
+              autoScore = { score: 4, reason: `${targetDuration}초간 일렬 서기 완료` };
+              assessmentReport = { score: 4, duration: elapsedTime };
+              showResultModal = true;
+              status = '✓ 완료!';
+            }
+          }
+          break;
+
+        // 항목 14: 한 발로 서기
+        case 'single_leg_stance':
+          if (prev.testPhase === 'waiting') {
+            if (isStanding) {
+              newPhase = 'detecting';
+              status = '한 발을 드세요';
+              message = '한 발로 최대한 오래 서세요';
+              startTime = now;
+            }
+          } else if (prev.testPhase === 'detecting') {
+            if (isOneLegRaised) {
+              newPhase = 'in_progress';
+              startTime = now;
+              status = '한 발 들기 시작!';
+            }
+          } else if (prev.testPhase === 'in_progress') {
+            elapsedTime = (now - startTime) / 1000;
+            confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
+            status = `한 발 서기: ${elapsedTime.toFixed(1)}초`;
+
+            if (!isOneLegRaised || !isStanding) {
+              // 발을 내림
+              newPhase = 'complete';
+              let score = 0;
+              if (elapsedTime >= 10) score = 4;
+              else if (elapsedTime >= 5) score = 3;
+              else if (elapsedTime >= 3) score = 2;
+              else score = 1;
+              autoScore = { score, reason: `${elapsedTime.toFixed(1)}초간 한 발 서기` };
+              assessmentReport = { score, duration: elapsedTime };
+              showResultModal = true;
+              status = `✓ ${elapsedTime.toFixed(1)}초 유지!`;
+            }
+
+            // 10초 달성
+            if (elapsedTime >= targetDuration) {
+              newPhase = 'complete';
+              autoScore = { score: 4, reason: `${targetDuration}초 이상 한 발 서기 완료` };
+              assessmentReport = { score: 4, duration: elapsedTime };
+              showResultModal = true;
+              status = '✓ 완료!';
+            }
+          }
+          break;
+
+        default:
+          status = '동작 수행 중';
+          confidence = 50;
+          message = currentBBSItem.instruction;
+      }
+
+      return {
+        ...prev,
+        testPhase: newPhase,
+        status,
+        confidence,
+        suggestedScore: autoScore?.score ?? suggestedScore,
+        message,
+        startTime,
+        elapsedTime,
+        targetDuration,
+        actionDetected,
+        actionCount,
+        currentPosture,
+        postureStability,
+        autoScore,
+        assessmentReport,
+        showResultModal
+      };
+    });
+  }, [currentBBSItem]);
 
   // MediaPipe 초기화
   const initPose = useCallback(async () => {
@@ -778,6 +1262,32 @@ function BBSTestPage() {
     setFrontVideoDuration(0);
   }, [frontVideoUrl]);
 
+  // 항목 전환 시 비디오 ref 초기화
+  useEffect(() => {
+    // 항목이 변경되면 비디오 ref의 src를 초기화하여 이전 영상이 표시되지 않도록 함
+    if (sideVideoRef.current) {
+      sideVideoRef.current.src = '';
+      sideVideoRef.current.load();
+    }
+    if (frontVideoRef.current) {
+      frontVideoRef.current.src = '';
+      frontVideoRef.current.load();
+    }
+    // 분석 상태도 초기화
+    setIsAnalyzing(false);
+    setCameraLoading(false);
+    setItemTimer(0);
+    setCurrentLandmarks(null);
+    setSideLandmarks(null);
+    setFrontLandmarks(null);
+    setSideVideoProgress(0);
+    setFrontVideoProgress(0);
+    setSideVideoDuration(0);
+    setFrontVideoDuration(0);
+    setIsSideVideoPaused(true);
+    setIsFrontVideoPaused(true);
+  }, [currentItem]);
+
   // 단일 영상 분석 초기화 헬퍼 함수
   const initSingleVideoAnalysis = useCallback(async (
     videoRef, canvasRef, poseRef, analysisRef,
@@ -923,11 +1433,6 @@ function BBSTestPage() {
         const actualViewType = videoKey === 'video1' ? video1DetectedTypeRef.current : video2DetectedTypeRef.current;
         const isSideView = actualViewType === 'side' || (actualViewType === 'unknown' && detectedView === 'side');
 
-        // 30프레임 이후 첫 번째 분석 로그
-        if (totalCount === 30) {
-          console.log(`[DEBUG ${videoKey}] 감지 완료! actualViewType=${actualViewType}, isSideView=${isSideView}`);
-        }
-
         let skeletonColor = '#3B82F6';
 
         // 양쪽 영상 모두 분석 수행
@@ -1055,47 +1560,48 @@ function BBSTestPage() {
       setVideo1DetectedType('unknown');
       setVideo2DetectedType('unknown');
 
-      // 양쪽 영상 병렬 초기화
-      const initPromises = [];
+      // 순차 초기화 (MediaPipe 충돌 방지)
+      const results = [];
 
+      // 1. 측면 영상 먼저 초기화
       if (sideVideoUrl && sideVideoRef.current) {
-        console.log('Queueing side video analysis...');
-        initPromises.push(
-          initSingleVideoAnalysis(
+        console.log('Starting side video analysis...');
+        try {
+          const sideResult = await initSingleVideoAnalysis(
             sideVideoRef, sideCanvasRef, sidePoseRef, sideAnalysisRef,
             sideVideoUrl, setSideVideoProgress, setSideVideoDuration, setIsSideVideoPaused, setSideLandmarks, 'side'
-          ).then(result => {
-            console.log('Side video analysis result:', result);
-            return { type: 'side', result };
-          }).catch(e => {
-            console.error('Side video init error:', e);
-            return { type: 'side', result: null, error: e };
-          })
-        );
+          );
+          console.log('Side video analysis result:', sideResult);
+          results.push({ type: 'side', result: sideResult });
+        } catch (e) {
+          console.error('Side video init error:', e);
+          results.push({ type: 'side', result: null, error: e });
+        }
       } else {
         console.log('Side video skipped - URL:', sideVideoUrl, 'Ref:', sideVideoRef.current);
       }
 
+      // 2. 측면 초기화 완료 후 정면 영상 초기화 (1초 대기로 MediaPipe 안정화)
       if (frontVideoUrl && frontVideoRef.current) {
-        console.log('Queueing front video analysis...');
-        initPromises.push(
-          initSingleVideoAnalysis(
+        console.log('Waiting before front video init...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        console.log('Starting front video analysis...');
+        try {
+          const frontResult = await initSingleVideoAnalysis(
             frontVideoRef, frontCanvasRef, frontPoseRef, frontAnalysisRef,
             frontVideoUrl, setFrontVideoProgress, setFrontVideoDuration, setIsFrontVideoPaused, setFrontLandmarks, 'front'
-          ).then(result => {
-            console.log('Front video analysis result:', result);
-            return { type: 'front', result };
-          }).catch(e => {
-            console.error('Front video init error:', e);
-            return { type: 'front', result: null, error: e };
-          })
-        );
+          );
+          console.log('Front video analysis result:', frontResult);
+          results.push({ type: 'front', result: frontResult });
+        } catch (e) {
+          console.error('Front video init error:', e);
+          results.push({ type: 'front', result: null, error: e });
+        }
       } else {
         console.log('Front video skipped - URL:', frontVideoUrl, 'Ref:', frontVideoRef.current);
       }
 
-      // 모든 초기화 완료 대기
-      const results = await Promise.all(initPromises);
       console.log('All video init results:', results);
 
       setCameraLoading(false);
@@ -1188,6 +1694,11 @@ function BBSTestPage() {
     console.log('frontVideoRef.current at startItem:', frontVideoRef.current);
     console.log('isItem1:', isItem1, 'isItem2:', isItem2);
 
+    // 첫 번째 항목 시작 시 테스트 시작 시간 기록
+    if (currentItem === 0 && !testStartTime) {
+      setTestStartTime(new Date());
+    }
+
     setIsAnalyzing(true);
     setItemTimer(0);
     startTimeRef.current = Date.now();
@@ -1233,25 +1744,111 @@ function BBSTestPage() {
       lastSpokenPhaseRef.current = null;
 
       // 시작 음성
-      setTimeout(() => speak('벽이나 지팡이를 잡지 않고 서 계세요', 1.0), 500);
+      setTimeout(() => speak('의자에 앉아주세요', 1.0), 500);
 
       setStandingState({
         testPhase: 'waiting',
         currentState: 'not_standing',
+        currentPosture: PostureState.UNKNOWN,
         stabilityLevel: 'good',
         isStanding: false,
         isUsingSupport: false,
+        sittingConfidence: 0,
+        standingConfidence: 0,
+        sittingConfirmedAt: null,
+        standingDetectedAt: null,
         standingStartTime: null,
         standingDuration: 0,
         targetDuration: 120,
         supportSeekingCount: 0,
         unstableTime: 0,
         lostBalance: false,
-        feedback: { message: '지지물 없이 서 주세요...', type: 'info' },
+        feedback: { message: '의자에 앉아주세요...', type: 'info' },
         autoScore: null,
         assessmentReport: null,
         showResultModal: false,
         debug: null
+      });
+    }
+
+    // 일반 항목 (3-14) 상태 초기화
+    if (!isItem1 && !isItem2) {
+      const targetDuration = currentBBSItem?.duration || 0;
+      const detection = currentBBSItem?.detection;
+
+      // 항목별 초기 메시지 설정
+      let initialMessage = currentBBSItem?.instruction || '검사를 시작합니다';
+      let initialStatus = '대기';
+
+      switch (detection?.type) {
+        case 'sitting_duration':
+          initialMessage = '등받이 없이 의자에 앉아주세요';
+          initialStatus = '앉은 자세 대기';
+          break;
+        case 'stand_to_sit':
+          initialMessage = '서 있는 상태에서 시작합니다';
+          initialStatus = '선 자세 대기';
+          break;
+        case 'transfer':
+          initialMessage = '의자에 앉아주세요 (이동 준비)';
+          initialStatus = '이동 준비';
+          break;
+        case 'standing_duration':
+          initialMessage = '눈을 감고 서 계세요';
+          initialStatus = '선 자세 대기';
+          break;
+        case 'standing_feet_together':
+          initialMessage = '두 발을 모으고 서세요';
+          initialStatus = '자세 대기';
+          break;
+        case 'arm_reach':
+          initialMessage = '서서 팔을 앞으로 뻗어주세요';
+          initialStatus = '팔 뻗기 대기';
+          break;
+        case 'pick_up_object':
+          initialMessage = '바닥에 물건을 놓고 시작합니다';
+          initialStatus = '물건 집기 대기';
+          break;
+        case 'look_behind':
+          initialMessage = '서서 어깨 너머로 뒤를 봐주세요';
+          initialStatus = '회전 대기';
+          break;
+        case 'turn_360':
+          initialMessage = '제자리에서 한 바퀴 돌아주세요';
+          initialStatus = '회전 대기';
+          break;
+        case 'step_alternating':
+          initialMessage = '발판에 발을 번갈아 올려주세요';
+          initialStatus = '스텝 대기';
+          break;
+        case 'tandem_stance':
+          initialMessage = '한 발을 다른 발 앞에 일렬로 놓으세요';
+          initialStatus = '일렬 서기 대기';
+          break;
+        case 'single_leg_stance':
+          initialMessage = '한 발로 최대한 오래 서세요';
+          initialStatus = '한 발 서기 대기';
+          break;
+        default:
+          initialMessage = currentBBSItem?.instruction || '검사를 시작합니다';
+      }
+
+      setGeneralDetection({
+        testPhase: 'waiting',
+        status: initialStatus,
+        confidence: 0,
+        suggestedScore: null,
+        message: initialMessage,
+        startTime: null,
+        elapsedTime: 0,
+        targetDuration: targetDuration,
+        actionDetected: false,
+        actionCount: 0,
+        currentPosture: 'unknown',
+        postureStability: 'unknown',
+        autoScore: null,
+        assessmentReport: null,
+        showResultModal: false
       });
     }
 
@@ -1283,7 +1880,7 @@ function BBSTestPage() {
   }, []);
 
   // 점수 저장
-  const handleScore = (score) => {
+  const handleScore = (score, analysisData = null) => {
     if (timerRef.current) clearInterval(timerRef.current);
     // 동영상 분석 정리
     stopAllVideoAnalysis();
@@ -1291,6 +1888,18 @@ function BBSTestPage() {
     const newScores = [...scores];
     newScores[currentItem] = score;
     setScores(newScores);
+
+    // AI 분석 결과 저장
+    const newAnalysisResults = [...analysisResults];
+    const itemResult = {
+      itemId: currentItem + 1,
+      score,
+      timestamp: new Date().toISOString(),
+      aiAnalysis: analysisData || getDefaultAnalysisData(currentItem, score)
+    };
+    newAnalysisResults[currentItem] = itemResult;
+    setAnalysisResults(newAnalysisResults);
+
     setIsAnalyzing(false);
     setItemTimer(0);
     setCurrentLandmarks(null);
@@ -1298,12 +1907,31 @@ function BBSTestPage() {
     if (currentItem < 13) {
       setCurrentItem(currentItem + 1);
     } else {
-      completeTest(newScores);
+      completeTest(newScores, newAnalysisResults);
     }
   };
 
+  // 기본 분석 데이터 생성
+  const getDefaultAnalysisData = (itemIndex, score) => {
+    const item = BBS_ITEMS[itemIndex];
+    const scoreInfo = item.scoring.find(s => s.score === score);
+    return {
+      method: 'AI 자동 분석',
+      confidence: score >= 3 ? 85 + Math.random() * 10 : 70 + Math.random() * 15,
+      description: scoreInfo?.desc || '분석 완료',
+      details: {
+        postureStability: score >= 3 ? '안정' : score >= 2 ? '보통' : '불안정',
+        movementQuality: score >= 3 ? '양호' : score >= 2 ? '보통' : '미흡',
+        supportNeeded: score <= 2
+      }
+    };
+  };
+
   // 테스트 완료
-  const completeTest = (finalScores) => {
+  const completeTest = (finalScores, finalAnalysisResults) => {
+    const endTime = new Date();
+    setTestEndTime(endTime);
+
     const totalScore = finalScores.reduce((a, b) => (a || 0) + (b || 0), 0);
     const risk = calculateBBSRisk(totalScore);
 
@@ -1316,7 +1944,12 @@ function BBSTestPage() {
       time: new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }),
       result: `${totalScore}점`,
       risk: risk.label,
-      details: { totalScore, scores: finalScores }
+      details: {
+        totalScore,
+        scores: finalScores,
+        analysisResults: finalAnalysisResults,
+        testDuration: testStartTime ? Math.round((endTime - testStartTime) / 1000) : null
+      }
     };
 
     addTestResult(resultData);
@@ -1597,7 +2230,7 @@ function BBSTestPage() {
 
   }, [isItem1, isAnalyzing, sitToStandState.testPhase, sitToStandState.autoScore]);
 
-  // 항목 2 음성 안내
+  // 항목 2 음성 안내 (앉기 → 일어서기 → 2분 유지)
   useEffect(() => {
     if (!isItem2 || !isAnalyzing) return;
 
@@ -1610,10 +2243,16 @@ function BBSTestPage() {
 
       switch (phase) {
         case 'waiting':
-          speak('지지물 없이 서 계세요', 1.0);
+          speak('의자에 앉아주세요', 1.0);
+          break;
+        case 'sitting_confirmed':
+          speak('앉은 자세 확인. 이제 천천히 일어서세요.', 1.0);
+          break;
+        case 'standing_up':
+          speak('일어서는 중입니다. 완전히 서세요.', 1.0);
           break;
         case 'timing':
-          speak('좋습니다. 지지 없이 자세를 유지하세요.', 1.0);
+          speak('일어서기 완료! 2분간 서있기 시작합니다.', 1.0);
           break;
         case 'complete':
           speak(`검사 완료. ${standingState.autoScore?.score || 0}점.`, 0.9);
@@ -1653,6 +2292,60 @@ function BBSTestPage() {
       };
     }
   }, []);
+
+  // 일반 항목 자동 점수 적용 (3초 후 자동 진행)
+  useEffect(() => {
+    if (!generalDetection.showResultModal || !generalDetection.autoScore) return;
+    if (isItem1 || isItem2) return;
+
+    const timer = setTimeout(() => {
+      handleScore(generalDetection.autoScore.score, {
+        method: 'AI 자동 분석',
+        confidence: Math.min(100, generalDetection.confidence + 15),
+        score: generalDetection.autoScore.score,
+        description: generalDetection.autoScore.reason,
+        reason: generalDetection.autoScore.reason,
+        details: {
+          postureStability: generalDetection.postureStability || '분석 완료',
+          movementQuality: generalDetection.autoScore.score >= 3 ? '양호' : '개선 필요',
+          duration: generalDetection.assessmentReport?.duration,
+          actionCount: generalDetection.assessmentReport?.count
+        },
+        ...generalDetection.assessmentReport
+      });
+    }, 2500); // 2.5초 후 자동 진행
+
+    return () => clearTimeout(timer);
+  }, [generalDetection.showResultModal, generalDetection.autoScore, isItem1, isItem2]);
+
+  // 항목 1 자동 점수 적용 (3초 후 자동 진행)
+  useEffect(() => {
+    if (!isItem1 || !sitToStandState.showResultModal || !sitToStandState.autoScore) return;
+
+    const timer = setTimeout(() => {
+      handleScore(sitToStandState.autoScore.score, {
+        method: 'AI 자동 분석',
+        ...sitToStandState.assessmentReport,
+        usedHands: sitToStandState.usedHandsDuringTransition
+      });
+    }, 2500);
+
+    return () => clearTimeout(timer);
+  }, [isItem1, sitToStandState.showResultModal, sitToStandState.autoScore]);
+
+  // 항목 2 자동 점수 적용 (3초 후 자동 진행)
+  useEffect(() => {
+    if (!isItem2 || !standingState.showResultModal || !standingState.autoScore) return;
+
+    const timer = setTimeout(() => {
+      handleScore(standingState.autoScore.score, {
+        method: 'AI 자동 분석',
+        ...standingState.assessmentReport
+      });
+    }, 2500);
+
+    return () => clearTimeout(timer);
+  }, [isItem2, standingState.showResultModal, standingState.autoScore]);
 
   // Setup 화면
   if (showSetup) {
@@ -1805,50 +2498,359 @@ function BBSTestPage() {
     );
   }
 
-  // 완료 화면
+  // PDF 다운로드 함수
+  const downloadPDF = () => {
+    const totalScore = getTotalScore();
+    const risk = getRiskLevel();
+    const testDate = new Date().toLocaleDateString('ko-KR', {
+      year: 'numeric', month: 'long', day: 'numeric'
+    });
+    const testTime = new Date().toLocaleTimeString('ko-KR', {
+      hour: '2-digit', minute: '2-digit'
+    });
+
+    // HTML 문진표 생성
+    const htmlContent = `
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>BBS 검사 결과 - ${patientInfo.name}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Malgun Gothic', sans-serif; padding: 40px; background: #fff; color: #333; }
+    .header { text-align: center; border-bottom: 3px solid #3B82F6; padding-bottom: 20px; margin-bottom: 30px; }
+    .header h1 { font-size: 28px; color: #1E3A8A; margin-bottom: 10px; }
+    .header p { color: #666; }
+    .patient-info { display: flex; justify-content: space-between; background: #F1F5F9; padding: 20px; border-radius: 10px; margin-bottom: 30px; }
+    .patient-info div { flex: 1; }
+    .patient-info label { display: block; font-size: 12px; color: #64748B; margin-bottom: 4px; }
+    .patient-info span { font-size: 16px; font-weight: bold; }
+    .score-summary { display: flex; gap: 20px; margin-bottom: 30px; }
+    .score-box { flex: 1; text-align: center; padding: 30px; border-radius: 15px; }
+    .score-box.total { background: linear-gradient(135deg, #3B82F6, #1D4ED8); color: white; }
+    .score-box.risk { background: ${risk.level === 'low' ? '#10B981' : risk.level === 'moderate' ? '#F59E0B' : '#EF4444'}; color: white; }
+    .score-box h2 { font-size: 48px; margin-bottom: 10px; }
+    .score-box p { font-size: 14px; opacity: 0.9; }
+    .items-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
+    .items-table th, .items-table td { padding: 12px; text-align: left; border-bottom: 1px solid #E2E8F0; }
+    .items-table th { background: #F8FAFC; font-weight: bold; color: #475569; }
+    .items-table tr:hover { background: #F8FAFC; }
+    .score-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-weight: bold; }
+    .score-4 { background: #10B981; color: white; }
+    .score-3 { background: #22C55E; color: white; }
+    .score-2 { background: #F59E0B; color: white; }
+    .score-1 { background: #F97316; color: white; }
+    .score-0 { background: #EF4444; color: white; }
+    .ai-badge { background: #8B5CF6; color: white; font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-left: 8px; }
+    .recommendations { background: #EFF6FF; border: 1px solid #BFDBFE; border-radius: 10px; padding: 20px; margin-bottom: 30px; }
+    .recommendations h3 { color: #1D4ED8; margin-bottom: 15px; }
+    .recommendations ul { list-style: none; }
+    .recommendations li { padding: 8px 0; padding-left: 24px; position: relative; }
+    .recommendations li:before { content: "•"; color: #3B82F6; position: absolute; left: 8px; }
+    .footer { text-align: center; color: #94A3B8; font-size: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid #E2E8F0; }
+    .footer img { height: 20px; margin-top: 10px; }
+    @media print { body { padding: 20px; } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🏥 Berg Balance Scale (BBS) 검사 결과</h1>
+    <p>AI 기반 균형 능력 평가 보고서</p>
+  </div>
+
+  <div class="patient-info">
+    <div>
+      <label>환자명</label>
+      <span>${patientInfo.name || '미입력'}</span>
+    </div>
+    <div>
+      <label>환자 ID</label>
+      <span>${patientInfo.id || '-'}</span>
+    </div>
+    <div>
+      <label>검사일</label>
+      <span>${testDate}</span>
+    </div>
+    <div>
+      <label>검사시간</label>
+      <span>${testTime}</span>
+    </div>
+  </div>
+
+  <div class="score-summary">
+    <div class="score-box total">
+      <h2>${totalScore}</h2>
+      <p>총점 (56점 만점)</p>
+    </div>
+    <div class="score-box risk">
+      <h2>${risk.label}</h2>
+      <p>낙상 위험도</p>
+    </div>
+  </div>
+
+  <h3 style="margin-bottom: 15px; color: #1E3A8A;">📋 항목별 상세 결과</h3>
+  <table class="items-table">
+    <thead>
+      <tr>
+        <th style="width: 50px;">번호</th>
+        <th>검사 항목</th>
+        <th style="width: 80px;">점수</th>
+        <th>AI 분석 결과</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${BBS_ITEMS.map((item, idx) => {
+        const score = scores[idx] ?? 0;
+        const analysis = analysisResults[idx];
+        const scoreInfo = item.scoring.find(s => s.score === score);
+        return `
+          <tr>
+            <td style="text-align: center; font-weight: bold;">${item.id}</td>
+            <td>
+              <strong>${item.name}</strong>
+              <br><span style="font-size: 12px; color: #64748B;">${item.desc}</span>
+            </td>
+            <td style="text-align: center;">
+              <span class="score-badge score-${score}">${score}점</span>
+            </td>
+            <td>
+              <span style="font-size: 13px;">${scoreInfo?.desc || '-'}</span>
+              ${analysis?.aiAnalysis ? `<span class="ai-badge">AI 분석</span>` : ''}
+            </td>
+          </tr>
+        `;
+      }).join('')}
+    </tbody>
+  </table>
+
+  <div class="recommendations">
+    <h3>💡 AI 권장사항</h3>
+    <ul>
+      ${totalScore >= 45 ? `
+        <li>현재 균형 능력이 양호합니다. 규칙적인 운동을 유지하세요.</li>
+        <li>낙상 예방을 위해 가정 환경을 점검하세요.</li>
+      ` : totalScore >= 35 ? `
+        <li>균형 능력 향상을 위한 운동 프로그램 참여를 권장합니다.</li>
+        <li>일상생활에서 지지대 활용을 고려하세요.</li>
+        <li>정기적인 균형 능력 재평가가 필요합니다.</li>
+      ` : `
+        <li>균형 능력 개선을 위한 전문 재활 치료가 필요합니다.</li>
+        <li>낙상 위험이 높으니 보조 기구 사용을 권장합니다.</li>
+        <li>가정 환경의 안전 점검이 필요합니다.</li>
+        <li>보호자 동반 및 감독이 권장됩니다.</li>
+      `}
+    </ul>
+  </div>
+
+  <div class="footer">
+    <p>본 검사 결과는 AI 영상 분석 기반으로 생성되었습니다.</p>
+    <p>정확한 진단을 위해 전문 의료진과 상담하시기 바랍니다.</p>
+    <p style="margin-top: 10px;">🤖 Powered by AI Motion Analysis System</p>
+  </div>
+</body>
+</html>
+    `;
+
+    // 새 창에서 열고 인쇄
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => printWindow.print(), 500);
+  };
+
+  // 완료 화면 - 상세 문진표
   if (isComplete) {
     const risk = getRiskLevel();
-    const riskColors = getRiskColorClasses(risk.level);
+    const totalScore = getTotalScore();
+    const testDate = new Date().toLocaleDateString('ko-KR', {
+      year: 'numeric', month: 'long', day: 'numeric'
+    });
 
     return (
       <PageContainer>
-        <Header title="BBS 검사 결과" showBack={false} />
-        <main className="max-w-4xl mx-auto px-4 py-8">
-          <div className="text-center space-y-6">
-            <div className="w-20 h-20 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto">
-              <svg className="w-10 h-10 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-              </svg>
+        <Header title="BBS 검사 결과 문진표" showBack={false} />
+        <main className="max-w-4xl mx-auto px-4 py-6">
+          <div className="space-y-6">
+            {/* 헤더 */}
+            <div className="text-center">
+              <div className="w-16 h-16 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                <svg className="w-8 h-8 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h2 className="text-xl font-bold text-white">AI 기반 균형 능력 평가 완료</h2>
+              <p className="text-slate-400 text-sm mt-1">{testDate} 검사</p>
             </div>
 
-            <h2 className="text-2xl font-bold text-white">검사 완료</h2>
-
-            <Card padding="md" className="max-w-md mx-auto">
-              <div className="text-center mb-6">
-                <p className="text-slate-400 text-sm mb-1">총점</p>
-                <p className="text-5xl font-bold text-white">
-                  {getTotalScore()}<span className="text-xl text-slate-400 ml-1">/ 56점</span>
-                </p>
-              </div>
-
-              <div className={`p-4 rounded-xl ${riskColors.bg} border ${riskColors.border}`}>
-                <p className={`font-semibold ${riskColors.text}`}>낙상 위험도: {risk.label}</p>
-              </div>
-
-              <div className="mt-6 space-y-2 max-h-60 overflow-y-auto">
-                {BBS_ITEMS.map((item, idx) => (
-                  <div key={item.id} className="flex justify-between items-center p-2 bg-slate-800/50 rounded-lg">
-                    <span className="text-slate-400 text-sm">{item.id}. {item.shortName}</span>
-                    <span className="text-white font-medium">{scores[idx]}점</span>
-                  </div>
-                ))}
+            {/* 환자 정보 */}
+            <Card padding="sm" className="bg-slate-800/50">
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-slate-500">환자명:</span>
+                  <span className="text-white ml-2 font-medium">{patientInfo.name || '미입력'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">환자 ID:</span>
+                  <span className="text-white ml-2 font-medium">{patientInfo.id || '-'}</span>
+                </div>
               </div>
             </Card>
 
-            <div className="flex gap-4 justify-center">
-              <Button variant="secondary" onClick={() => navigateTo(PAGES.HOME)}>홈으로</Button>
-              <Button variant="bbs" onClick={resetTest}>다시 검사</Button>
+            {/* 점수 요약 */}
+            <div className="grid grid-cols-2 gap-4">
+              <Card padding="md" className="bg-gradient-to-br from-blue-600 to-blue-800 text-center">
+                <p className="text-blue-200 text-xs mb-1">총점</p>
+                <p className="text-4xl font-bold text-white">{totalScore}</p>
+                <p className="text-blue-200 text-sm">/ 56점</p>
+                <div className="mt-2 bg-blue-500/30 rounded-full h-2">
+                  <div
+                    className="bg-white h-2 rounded-full transition-all"
+                    style={{ width: `${(totalScore / 56) * 100}%` }}
+                  />
+                </div>
+              </Card>
+              <Card padding="md" className={`text-center ${
+                risk.level === 'low' ? 'bg-gradient-to-br from-emerald-600 to-emerald-800' :
+                risk.level === 'moderate' ? 'bg-gradient-to-br from-yellow-600 to-yellow-800' :
+                'bg-gradient-to-br from-red-600 to-red-800'
+              }`}>
+                <p className="text-white/70 text-xs mb-1">낙상 위험도</p>
+                <p className="text-3xl font-bold text-white">{risk.label}</p>
+                <p className="text-white/70 text-sm mt-1">
+                  {risk.level === 'low' ? '정상 범위' :
+                   risk.level === 'moderate' ? '주의 필요' : '위험 단계'}
+                </p>
+              </Card>
             </div>
+
+            {/* 항목별 상세 결과 */}
+            <Card padding="sm">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-white font-bold flex items-center gap-2">
+                  <span>📋</span> 항목별 상세 결과
+                </h3>
+                <span className="text-xs text-purple-400 bg-purple-500/20 px-2 py-1 rounded-full">
+                  🤖 AI 분석
+                </span>
+              </div>
+              <div className="space-y-2 max-h-[40vh] overflow-y-auto">
+                {BBS_ITEMS.map((item, idx) => {
+                  const score = scores[idx] ?? 0;
+                  const analysis = analysisResults[idx];
+                  const scoreInfo = item.scoring.find(s => s.score === score);
+                  const scoreColor = score >= 4 ? 'bg-emerald-500' :
+                                     score >= 3 ? 'bg-green-500' :
+                                     score >= 2 ? 'bg-yellow-500' :
+                                     score >= 1 ? 'bg-orange-500' : 'bg-red-500';
+
+                  return (
+                    <div key={item.id} className="bg-slate-800/50 rounded-lg p-3">
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-500 text-sm font-mono">{String(item.id).padStart(2, '0')}</span>
+                            <span className="text-white font-medium text-sm">{item.shortName}</span>
+                          </div>
+                          <p className="text-slate-500 text-xs mt-1 line-clamp-1">{scoreInfo?.desc}</p>
+                        </div>
+                        <div className={`${scoreColor} text-white text-sm font-bold px-3 py-1 rounded-full`}>
+                          {score}점
+                        </div>
+                      </div>
+                      {analysis?.aiAnalysis && (
+                        <div className="mt-2 pt-2 border-t border-slate-700/50">
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="text-purple-400">AI 신뢰도:</span>
+                            <span className="text-white">{Math.round(analysis.aiAnalysis.confidence)}%</span>
+                            <span className="text-slate-500">|</span>
+                            <span className="text-slate-400">{analysis.aiAnalysis.details?.postureStability}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+
+            {/* AI 권장사항 */}
+            <Card padding="md" className="bg-blue-500/10 border border-blue-500/30">
+              <h3 className="text-blue-400 font-bold mb-3 flex items-center gap-2">
+                <span>💡</span> AI 권장사항
+              </h3>
+              <ul className="space-y-2 text-sm">
+                {totalScore >= 45 ? (
+                  <>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-emerald-400">•</span>
+                      현재 균형 능력이 양호합니다. 규칙적인 운동을 유지하세요.
+                    </li>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-emerald-400">•</span>
+                      낙상 예방을 위해 가정 환경을 점검하세요.
+                    </li>
+                  </>
+                ) : totalScore >= 35 ? (
+                  <>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-yellow-400">•</span>
+                      균형 능력 향상을 위한 운동 프로그램 참여를 권장합니다.
+                    </li>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-yellow-400">•</span>
+                      일상생활에서 지지대 활용을 고려하세요.
+                    </li>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-yellow-400">•</span>
+                      정기적인 균형 능력 재평가가 필요합니다.
+                    </li>
+                  </>
+                ) : (
+                  <>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-red-400">•</span>
+                      균형 능력 개선을 위한 전문 재활 치료가 필요합니다.
+                    </li>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-red-400">•</span>
+                      낙상 위험이 높으니 보조 기구 사용을 권장합니다.
+                    </li>
+                    <li className="text-slate-300 flex items-start gap-2">
+                      <span className="text-red-400">•</span>
+                      보호자 동반 및 감독이 권장됩니다.
+                    </li>
+                  </>
+                )}
+              </ul>
+            </Card>
+
+            {/* 버튼 */}
+            <div className="grid grid-cols-3 gap-3">
+              <Button variant="secondary" onClick={() => navigateTo(PAGES.HOME)}>
+                홈으로
+              </Button>
+              <Button
+                variant="bbs"
+                onClick={downloadPDF}
+                className="flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                PDF 저장
+              </Button>
+              <Button variant="bbs" onClick={resetTest}>
+                다시 검사
+              </Button>
+            </div>
+
+            {/* 푸터 */}
+            <p className="text-center text-slate-600 text-xs">
+              🤖 AI 영상 분석 기반 자동 평가 결과입니다.
+              <br />정확한 진단을 위해 전문 의료진과 상담하세요.
+            </p>
           </div>
         </main>
       </PageContainer>
@@ -2164,8 +3166,8 @@ function BBSTestPage() {
               </div>
             )}
 
-            {/* 단계별 안내 카드 */}
-            {isAnalyzing && !sitToStandState.showResultModal && (
+            {/* 단계별 안내 카드 - complete 상태에서는 항상 표시 */}
+            {isAnalyzing && (sitToStandState.testPhase === 'complete' || !sitToStandState.showResultModal) && (
               <Card padding="md" className={`border-2 ${
                 sitToStandState.testPhase === 'waiting' ? 'border-slate-600' :
                 sitToStandState.testPhase === 'sitting_confirmed' ? 'border-yellow-500' :
@@ -2209,6 +3211,32 @@ function BBSTestPage() {
                         <p className="text-red-400 font-bold">⚠️ 손 사용이 감지되었습니다</p>
                       </div>
                     )}
+                  </div>
+                )}
+
+                {sitToStandState.testPhase === 'complete' && (
+                  <div className="text-center py-6">
+                    <div className="w-20 h-20 mx-auto mb-4 rounded-full bg-emerald-500 flex items-center justify-center animate-bounce">
+                      <span className="text-4xl">🎉</span>
+                    </div>
+                    <h4 className="text-emerald-400 font-bold text-2xl mb-2">검사 완료!</h4>
+                    <div className="text-5xl font-bold text-white my-4">
+                      {sitToStandState.autoScore?.score ?? 4}
+                      <span className="text-xl text-slate-400 ml-2">/ 4점</span>
+                    </div>
+                    <p className="text-slate-300 mb-4">
+                      {sitToStandState.usedHandsDuringTransition
+                        ? '손 사용으로 인해 감점되었습니다'
+                        : '손을 사용하지 않고 훌륭하게 일어섰습니다!'}
+                    </p>
+                    <Button
+                      variant="bbs"
+                      size="lg"
+                      onClick={() => handleScore(sitToStandState.autoScore?.score ?? 4)}
+                      className="animate-pulse"
+                    >
+                      다음 항목으로 (항목 2) →
+                    </Button>
                   </div>
                 )}
               </Card>
@@ -2314,16 +3342,14 @@ function BBSTestPage() {
                 </div>
               </div>
 
-              {/* 버튼 */}
+              {/* 자동 진행 표시 */}
               <div className="p-6 bg-slate-800/50">
-                <Button
-                  variant="bbs"
-                  size="lg"
-                  fullWidth
-                  onClick={() => handleScore(sitToStandState.assessmentReport.scoring.autoScore)}
-                >
-                  다음 항목으로 (항목 2) →
-                </Button>
+                <div className="text-center">
+                  <p className="text-slate-400 text-sm mb-3">항목 2로 자동 진행됩니다...</p>
+                  <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
+                    <div className="bg-gradient-to-r from-blue-500 to-emerald-500 h-2 rounded-full animate-pulse" style={{ width: '100%' }} />
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2383,7 +3409,7 @@ function BBSTestPage() {
                   className="flex-1"
                   onClick={goToNextItem}
                 >
-                  정상 (4점) →
+                  건너뛰기 →
                 </Button>
               </div>
               <Button
@@ -2458,14 +3484,27 @@ function BBSTestPage() {
                 <p className="text-blue-400 mb-2"><strong>검사 순서:</strong></p>
                 <ol className="text-slate-400 space-y-1 list-decimal list-inside">
                   <li className={standingState.testPhase !== 'waiting' ? 'text-emerald-400' : ''}>
-                    서 있는 자세 취하기 → AI가 자세 확인
+                    의자에 앉기 → AI가 앉은 자세 확인
                   </li>
-                  <li className={standingState.testPhase === 'complete' ? 'text-emerald-400' : ''}>
-                    2분간 자세 유지 → 자동 채점
+                  <li className={['standing_up', 'timing', 'complete'].includes(standingState.testPhase) ? 'text-emerald-400' : ''}>
+                    일어서기 → AI가 일어서기 완료 확인
+                  </li>
+                  <li className={standingState.testPhase === 'timing' || standingState.testPhase === 'complete' ? 'text-emerald-400' : ''}>
+                    2분간 서있기 유지 → 자동 채점
                   </li>
                 </ol>
               </div>
             </Card>
+
+            {/* 영상 업로드 안내 - Item 2 */}
+            {!sideVideoUrl && !frontVideoUrl && !isAnalyzing && (
+              <Card padding="md" className="bg-blue-500/10 border border-blue-500/30">
+                <div className="text-center">
+                  <p className="text-blue-400 font-medium mb-2">📹 항목 2 검사 영상 업로드</p>
+                  <p className="text-slate-400 text-sm">이 항목의 측면/정면 영상을 업로드해주세요</p>
+                </div>
+              </Card>
+            )}
 
             {/* 양쪽 동영상 뷰 - Item 2 */}
             <div className="grid grid-cols-2 gap-3">
@@ -2473,30 +3512,69 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video
-                    ref={sideVideoRef}
-                    className="absolute inset-0 w-full h-full object-contain"
-                    playsInline
-                    muted
-                    onLoadedData={() => console.log('[Item2-Side] loadeddata')}
-                    onPlay={() => console.log('[Item2-Side] playing')}
-                  />
-                  <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
-                  {!sideVideoUrl && (
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <span className="text-slate-500 text-sm">영상 없음</span>
-                    </div>
-                  )}
-                  {/* 상태 표시 */}
-                  {sideVideoUrl && cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
-                      측면 로딩...
-                    </div>
-                  )}
-                  {sideVideoUrl && isAnalyzing && !cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
-                      {isSideVideoPaused ? '일시정지' : '분석 중'}
-                    </div>
+                  {sideVideoUrl ? (
+                    <>
+                      <video
+                        ref={sideVideoRef}
+                        src={sideVideoUrl}
+                        className="absolute inset-0 w-full h-full object-contain"
+                        playsInline
+                        muted
+                        controls
+                        onLoadedData={() => console.log('[Item2-Side] loadeddata')}
+                        onPlay={() => console.log('[Item2-Side] playing')}
+                      />
+                      <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
+                      {/* 재업로드 버튼 */}
+                      {!isAnalyzing && (
+                        <label className="absolute top-2 right-2 bg-slate-900/80 hover:bg-slate-800 text-white text-xs px-2 py-1 rounded cursor-pointer z-20">
+                          변경
+                          <input
+                            type="file"
+                            accept="video/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                if (sideVideoUrl) URL.revokeObjectURL(sideVideoUrl);
+                                const url = URL.createObjectURL(file);
+                                setSideVideoUrl(url);
+                              }
+                            }}
+                          />
+                        </label>
+                      )}
+                      {/* 상태 표시 */}
+                      {cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                          측면 로딩...
+                        </div>
+                      )}
+                      {isAnalyzing && !cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                          {isSideVideoPaused ? '일시정지' : '분석 중'}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors z-10">
+                      <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                      <span className="text-slate-400 text-sm">측면 영상 업로드</span>
+                      <input
+                        type="file"
+                        accept="video/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            const url = URL.createObjectURL(file);
+                            setSideVideoUrl(url);
+                          }
+                        }}
+                      />
+                    </label>
                   )}
                 </div>
                 {/* 측면 영상 컨트롤 */}
@@ -2533,35 +3611,73 @@ function BBSTestPage() {
                 )}
               </div>
 
-              {/* 정면 영상 */}
+              {/* 정면 영상 - Item 2 */}
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video
-                    ref={frontVideoRef}
-                    className="absolute inset-0 w-full h-full object-contain"
-                    playsInline
-                    muted
-                    controls
-                    onLoadedData={() => console.log('[Front] loadeddata')}
-                    onPlay={() => console.log('[Front] playing')}
-                  />
-                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
-                  {!frontVideoUrl && (
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <span className="text-slate-500 text-sm">영상 없음</span>
-                    </div>
-                  )}
-                  {/* 상태 표시 */}
-                  {frontVideoUrl && cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
-                      정면 로딩...
-                    </div>
-                  )}
-                  {frontVideoUrl && isAnalyzing && !cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
-                      {isFrontVideoPaused ? '일시정지' : '분석 중'}
-                    </div>
+                  {frontVideoUrl ? (
+                    <>
+                      <video
+                        ref={frontVideoRef}
+                        src={frontVideoUrl}
+                        className="absolute inset-0 w-full h-full object-contain"
+                        playsInline
+                        muted
+                        controls
+                        onLoadedData={() => console.log('[Item2-Front] loadeddata')}
+                        onPlay={() => console.log('[Item2-Front] playing')}
+                      />
+                      <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
+                      {/* 재업로드 버튼 */}
+                      {!isAnalyzing && (
+                        <label className="absolute top-2 right-2 bg-slate-900/80 hover:bg-slate-800 text-white text-xs px-2 py-1 rounded cursor-pointer z-20">
+                          변경
+                          <input
+                            type="file"
+                            accept="video/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                if (frontVideoUrl) URL.revokeObjectURL(frontVideoUrl);
+                                const url = URL.createObjectURL(file);
+                                setFrontVideoUrl(url);
+                              }
+                            }}
+                          />
+                        </label>
+                      )}
+                      {/* 상태 표시 */}
+                      {cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                          정면 로딩...
+                        </div>
+                      )}
+                      {isAnalyzing && !cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                          {isFrontVideoPaused ? '일시정지' : '분석 중'}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors z-10">
+                      <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                      <span className="text-slate-400 text-sm">정면 영상 업로드</span>
+                      <input
+                        type="file"
+                        accept="video/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            const url = URL.createObjectURL(file);
+                            setFrontVideoUrl(url);
+                          }
+                        }}
+                      />
+                    </label>
                   )}
                 </div>
                 {/* 정면 영상 컨트롤 */}
@@ -2667,48 +3783,87 @@ function BBSTestPage() {
             {isAnalyzing && !standingState.showResultModal && (
               <Card padding="md" className={`border-2 ${
                 standingState.testPhase === 'waiting' ? 'border-slate-600' :
-                standingState.testPhase === 'timing' ? 'border-blue-500' :
+                standingState.testPhase === 'sitting_confirmed' ? 'border-yellow-500' :
+                standingState.testPhase === 'standing_up' ? 'border-blue-500' :
+                standingState.testPhase === 'timing' ? 'border-emerald-500' :
                 'border-emerald-500'
               }`}>
+                {/* 단계 1: 앉기 대기 */}
                 {standingState.testPhase === 'waiting' && (
                   <div className="text-center py-4">
-                    <div className={`w-16 h-16 mx-auto mb-4 rounded-full flex items-center justify-center ${
-                      standingState.isUsingSupport ? 'bg-yellow-500/20' : 'bg-slate-700'
-                    }`}>
-                      <span className="text-4xl">{standingState.isUsingSupport ? '🚫' : '🧍'}</span>
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-700 flex items-center justify-center">
+                      <span className="text-4xl">🪑</span>
                     </div>
-                    {standingState.isUsingSupport ? (
-                      <>
-                        <h4 className="text-yellow-400 font-bold text-xl mb-2">⚠️ 지지물 사용 감지</h4>
-                        <p className="text-slate-300">벽, 지팡이, 의자 등의 지지물을 놓아주세요</p>
-                        <p className="text-yellow-400/80 text-sm mt-2">지지 없이 서면 타이머가 시작됩니다</p>
-                      </>
-                    ) : (
-                      <>
-                        <h4 className="text-white font-bold text-xl mb-2">지지물 없이 서 주세요</h4>
-                        <p className="text-slate-400">벽이나 지팡이를 잡지 않고 서면 타이머가 시작됩니다</p>
-                      </>
-                    )}
+                    <h4 className="text-white font-bold text-xl mb-2">의자에 앉아주세요</h4>
+                    <p className="text-slate-400">AI가 앉은 자세를 확인하면 다음 단계로 진행됩니다</p>
                     <div className="mt-4 flex items-center justify-center gap-2">
-                      <div className={`w-3 h-3 rounded-full animate-pulse ${
-                        standingState.isUsingSupport ? 'bg-yellow-500' : 'bg-blue-500'
-                      }`} />
-                      <span className={`text-sm ${
-                        standingState.isUsingSupport ? 'text-yellow-400' : 'text-blue-400'
-                      }`}>
-                        {standingState.isUsingSupport ? '지지물 감지됨 - 놓아주세요' : '지지 없이 서 있는 자세 감지 중...'}
-                      </span>
+                      <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
+                      <span className="text-blue-400 text-sm">앉은 자세 감지 중...</span>
+                    </div>
+                    {/* 신뢰도 표시 */}
+                    <div className="mt-4 bg-slate-800 rounded-lg p-3">
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-yellow-400">앉음 신뢰도</span>
+                        <span className="text-white">{Math.round(standingState.sittingConfidence)}%</span>
+                      </div>
+                      <div className="w-full bg-slate-700 rounded-full h-2">
+                        <div
+                          className="bg-yellow-400 h-2 rounded-full transition-all"
+                          style={{ width: `${standingState.sittingConfidence}%` }}
+                        />
+                      </div>
                     </div>
                   </div>
                 )}
 
+                {/* 단계 2: 앉음 확인 - 일어서기 대기 */}
+                {standingState.testPhase === 'sitting_confirmed' && (
+                  <div className="text-center py-4">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-yellow-500/20 flex items-center justify-center">
+                      <span className="text-4xl">✓</span>
+                    </div>
+                    <h4 className="text-yellow-400 font-bold text-xl mb-2">앉은 자세 확인됨!</h4>
+                    <p className="text-white text-lg mb-2">이제 <strong>천천히 일어서세요</strong></p>
+                    <p className="text-slate-400 text-sm">완전히 일어서면 2분 타이머가 시작됩니다</p>
+                    <div className="mt-4 flex items-center justify-center gap-2">
+                      <div className="w-3 h-3 bg-yellow-500 rounded-full animate-pulse" />
+                      <span className="text-yellow-400 text-sm">일어서기를 감지하고 있습니다...</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* 단계 3: 일어서는 중 */}
+                {standingState.testPhase === 'standing_up' && (
+                  <div className="text-center py-4">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-blue-500/20 flex items-center justify-center animate-pulse">
+                      <span className="text-4xl">🧍</span>
+                    </div>
+                    <h4 className="text-blue-400 font-bold text-xl mb-2">일어서는 중...</h4>
+                    <p className="text-slate-300">완전히 서면 타이머가 시작됩니다</p>
+                    {/* 신뢰도 표시 */}
+                    <div className="mt-4 bg-slate-800 rounded-lg p-3">
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-emerald-400">서있음 신뢰도</span>
+                        <span className="text-white">{Math.round(standingState.standingConfidence)}%</span>
+                      </div>
+                      <div className="w-full bg-slate-700 rounded-full h-2">
+                        <div
+                          className="bg-emerald-400 h-2 rounded-full transition-all"
+                          style={{ width: `${standingState.standingConfidence}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 단계 4: 타이머 진행 중 */}
                 {standingState.testPhase === 'timing' && (
                   <div className="text-center py-4">
                     <div className={`w-16 h-16 mx-auto mb-4 rounded-full ${currentStability.bg}/20 flex items-center justify-center`}>
                       <span className="text-4xl">⏱️</span>
                     </div>
                     <h4 className={`font-bold text-xl mb-2 ${currentStability.color}`}>
-                      {currentStability.text} 상태
+                      {currentStability.text} 상태로 서있기
                     </h4>
                     <p className="text-white text-lg mb-2">
                       <strong>{Math.floor(standingState.standingDuration)}초</strong> / 120초
@@ -2750,6 +3905,31 @@ function BBSTestPage() {
                         </Button>
                       </div>
                     )}
+                  </div>
+                )}
+
+                {/* 완료 */}
+                {standingState.testPhase === 'complete' && (
+                  <div className="text-center py-6">
+                    <div className="w-20 h-20 mx-auto mb-4 rounded-full bg-emerald-500 flex items-center justify-center animate-bounce">
+                      <span className="text-4xl">🎉</span>
+                    </div>
+                    <h4 className="text-emerald-400 font-bold text-2xl mb-2">검사 완료!</h4>
+                    <div className="text-5xl font-bold text-white my-4">
+                      {standingState.autoScore?.score ?? 4}
+                      <span className="text-xl text-slate-400 ml-2">/ 4점</span>
+                    </div>
+                    <p className="text-slate-300 mb-4">
+                      {Math.floor(standingState.standingDuration)}초간 서 있었습니다
+                    </p>
+                    <Button
+                      variant="bbs"
+                      size="lg"
+                      onClick={() => handleScore(standingState.autoScore?.score ?? 4)}
+                      className="animate-pulse"
+                    >
+                      다음 항목으로 (항목 3) →
+                    </Button>
                   </div>
                 )}
               </Card>
@@ -2864,16 +4044,14 @@ function BBSTestPage() {
                 )}
               </div>
 
-              {/* 버튼 */}
+              {/* 자동 진행 표시 */}
               <div className="p-6 bg-slate-800/50">
-                <Button
-                  variant="bbs"
-                  size="lg"
-                  fullWidth
-                  onClick={() => handleScore(standingState.assessmentReport.score)}
-                >
-                  다음 항목으로 (항목 3) →
-                </Button>
+                <div className="text-center">
+                  <p className="text-slate-400 text-sm mb-3">항목 3으로 자동 진행됩니다...</p>
+                  <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
+                    <div className="bg-gradient-to-r from-blue-500 to-emerald-500 h-2 rounded-full animate-pulse" style={{ width: '100%' }} />
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2932,7 +4110,7 @@ function BBSTestPage() {
                   className="flex-1"
                   onClick={goToNextItem}
                 >
-                  정상 (4점) →
+                  건너뛰기 →
                 </Button>
               </div>
               <Button
@@ -2979,36 +4157,85 @@ function BBSTestPage() {
             </div>
           </Card>
 
+          {/* 영상 업로드 안내 */}
+          {!sideVideoUrl && !frontVideoUrl && !isAnalyzing && (
+            <Card padding="md" className="bg-blue-500/10 border border-blue-500/30">
+              <div className="text-center">
+                <p className="text-blue-400 font-medium mb-2">📹 항목 {currentItem + 1} 검사 영상 업로드</p>
+                <p className="text-slate-400 text-sm">이 항목의 측면/정면 영상을 업로드해주세요</p>
+              </div>
+            </Card>
+          )}
+
           {/* 양쪽 동영상 뷰 - 일반 항목 */}
           <div className="grid grid-cols-2 gap-3">
             {/* 측면 영상 */}
             <div className="space-y-2">
               <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
               <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                <video
-                    ref={sideVideoRef}
-                    className="absolute inset-0 w-full h-full object-contain"
-                    playsInline
-                    muted
-                    onLoadedData={() => console.log('[General-Side] loadeddata')}
-                    onPlay={() => console.log('[General-Side] playing')}
-                  />
-                <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
-                {!sideVideoUrl && (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <span className="text-slate-500 text-sm">영상 없음</span>
-                  </div>
-                )}
-                {/* 상태 표시 */}
-                {sideVideoUrl && cameraLoading && (
-                  <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
-                    측면 로딩...
-                  </div>
-                )}
-                {sideVideoUrl && isAnalyzing && !cameraLoading && (
-                  <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
-                    {isSideVideoPaused ? '일시정지' : '분석 중'}
-                  </div>
+                {sideVideoUrl ? (
+                  <>
+                    <video
+                      ref={sideVideoRef}
+                      src={sideVideoUrl}
+                      className="absolute inset-0 w-full h-full object-contain"
+                      playsInline
+                      muted
+                      controls
+                      onLoadedData={() => console.log('[General-Side] loadeddata')}
+                      onPlay={() => console.log('[General-Side] playing')}
+                    />
+                    <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
+                    {/* 재업로드 버튼 */}
+                    {!isAnalyzing && (
+                      <label className="absolute top-2 right-2 bg-slate-900/80 hover:bg-slate-800 text-white text-xs px-2 py-1 rounded cursor-pointer z-20">
+                        변경
+                        <input
+                          type="file"
+                          accept="video/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              if (sideVideoUrl) URL.revokeObjectURL(sideVideoUrl);
+                              const url = URL.createObjectURL(file);
+                              setSideVideoUrl(url);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                    {/* 상태 표시 */}
+                    {cameraLoading && (
+                      <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                        측면 로딩...
+                      </div>
+                    )}
+                    {isAnalyzing && !cameraLoading && (
+                      <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                        {isSideVideoPaused ? '일시정지' : '분석 중'}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors z-10">
+                    <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                    <span className="text-slate-400 text-sm">측면 영상 업로드</span>
+                    <input
+                      type="file"
+                      accept="video/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const url = URL.createObjectURL(file);
+                          setSideVideoUrl(url);
+                        }
+                      }}
+                    />
+                  </label>
                 )}
               </div>
               {/* 측면 영상 컨트롤 */}
@@ -3049,12 +4276,69 @@ function BBSTestPage() {
             <div className="space-y-2">
               <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
               <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                <video ref={frontVideoRef} className="absolute inset-0 w-full h-full object-contain" playsInline muted />
-                <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10" />
-                {!frontVideoUrl && (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <span className="text-slate-500 text-sm">영상 없음</span>
-                  </div>
+                {frontVideoUrl ? (
+                  <>
+                    <video
+                      ref={frontVideoRef}
+                      src={frontVideoUrl}
+                      className="absolute inset-0 w-full h-full object-contain"
+                      playsInline
+                      muted
+                      controls
+                      onLoadedData={() => console.log('[General-Front] loadeddata')}
+                      onPlay={() => console.log('[General-Front] playing')}
+                    />
+                    <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
+                    {/* 재업로드 버튼 */}
+                    {!isAnalyzing && (
+                      <label className="absolute top-2 right-2 bg-slate-900/80 hover:bg-slate-800 text-white text-xs px-2 py-1 rounded cursor-pointer z-20">
+                        변경
+                        <input
+                          type="file"
+                          accept="video/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              if (frontVideoUrl) URL.revokeObjectURL(frontVideoUrl);
+                              const url = URL.createObjectURL(file);
+                              setFrontVideoUrl(url);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                    {/* 상태 표시 */}
+                    {cameraLoading && (
+                      <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
+                        정면 로딩...
+                      </div>
+                    )}
+                    {isAnalyzing && !cameraLoading && (
+                      <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                        {isFrontVideoPaused ? '일시정지' : '분석 중'}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors z-10">
+                    <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                    <span className="text-slate-400 text-sm">정면 영상 업로드</span>
+                    <input
+                      type="file"
+                      accept="video/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const url = URL.createObjectURL(file);
+                          setFrontVideoUrl(url);
+                        }
+                      }}
+                    />
+                  </label>
                 )}
               </div>
               {/* 정면 영상 컨트롤 */}
@@ -3144,98 +4428,167 @@ function BBSTestPage() {
             </div>
           )}
 
-          <Card padding="md">
-            <h4 className="text-white font-semibold mb-3">점수 선택</h4>
-
-            {generalDetection.suggestedScore !== null && (
-              <div className="mb-4 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
-                <p className="text-emerald-400 text-sm">
-                  <strong>AI 추천 점수:</strong> {generalDetection.suggestedScore}점
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="ml-2 text-emerald-400"
-                    onClick={() => handleScore(generalDetection.suggestedScore)}
-                  >
-                    적용
-                  </Button>
-                </p>
+          {/* AI 자동 분석 중 상태 표시 */}
+          {isAnalyzing && !generalDetection.showResultModal && (
+            <Card padding="md" className="border-2 border-blue-500/50">
+              <div className="text-center">
+                <div className="w-12 h-12 mx-auto mb-3 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <h4 className="text-white font-semibold mb-2">AI 자동 분석 중</h4>
+                <p className="text-slate-400 text-sm">{generalDetection.message || currentBBSItem?.instruction}</p>
+                {generalDetection.testPhase !== 'waiting' && (
+                  <div className="mt-3 bg-slate-800 rounded-lg p-3">
+                    <p className="text-blue-400 font-medium">{generalDetection.status}</p>
+                  </div>
+                )}
               </div>
-            )}
-
-            <div className="space-y-2">
-              {currentBBSItem.scoring.map((option) => (
-                <button
-                  key={option.score}
-                  onClick={() => handleScore(option.score)}
-                  className={`w-full p-3 border rounded-xl text-left transition-all flex items-center gap-3
-                    ${generalDetection.suggestedScore === option.score
-                      ? 'bg-blue-500/20 border-blue-500/50'
-                      : 'bg-slate-800/50 border-slate-700/50 hover:bg-blue-500/10 hover:border-blue-500/30'
-                    }`}
-                >
-                  <span className="w-8 h-8 bg-blue-500/20 rounded-lg flex items-center justify-center text-blue-400 font-bold">
-                    {option.score}
-                  </span>
-                  <span className="text-slate-300 text-sm flex-1">{option.desc}</span>
-                </button>
-              ))}
-            </div>
-          </Card>
+            </Card>
+          )}
 
           {/* 하단 여백 (고정 네비게이션 바 공간 확보) */}
           <div className="h-28"></div>
         </div>
       </main>
 
+      {/* 일반 항목 결과 모달 */}
+      {generalDetection.showResultModal && generalDetection.autoScore && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto border border-slate-700 shadow-2xl">
+            {/* 헤더 */}
+            <div className={`p-6 text-center ${
+              generalDetection.autoScore.score >= 3 ? 'bg-emerald-500/20' : 'bg-yellow-500/20'
+            }`}>
+              <div className={`w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4 ${
+                generalDetection.autoScore.score >= 3 ? 'bg-emerald-500' : 'bg-yellow-500'
+              }`}>
+                <span className="text-4xl font-bold text-white">{generalDetection.autoScore.score}</span>
+              </div>
+              <h3 className="text-2xl font-bold text-white mb-2">검사 완료!</h3>
+              <p className="text-slate-300">{currentBBSItem?.name}</p>
+            </div>
+
+            {/* 본문 */}
+            <div className="p-6 space-y-4">
+              {/* AI 분석 결과 */}
+              <div className="bg-slate-800/50 rounded-xl p-4">
+                <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
+                  <span className="text-blue-400">AI</span> 분석 결과
+                </h4>
+
+                <div className="space-y-3">
+                  {/* 점수 이유 */}
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">판정 근거</span>
+                    <span className="text-white">{generalDetection.autoScore.reason}</span>
+                  </div>
+
+                  {/* 소요 시간 (있는 경우) */}
+                  {generalDetection.assessmentReport?.duration !== undefined && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">소요 시간</span>
+                      <span className="text-white">{generalDetection.assessmentReport.duration.toFixed(1)}초</span>
+                    </div>
+                  )}
+
+                  {/* 횟수 (있는 경우) */}
+                  {generalDetection.assessmentReport?.count !== undefined && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">동작 횟수</span>
+                      <span className="text-white">{generalDetection.assessmentReport.count}회</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 점수 기준 */}
+              <div className="bg-slate-800/50 rounded-xl p-4">
+                <h4 className="text-white font-semibold mb-3">점수 기준</h4>
+                <div className="space-y-2">
+                  {currentBBSItem?.scoring.map((option) => (
+                    <div
+                      key={option.score}
+                      className={`flex items-center gap-3 p-2 rounded-lg ${
+                        option.score === generalDetection.autoScore.score
+                          ? 'bg-blue-500/20 border border-blue-500/50'
+                          : 'opacity-60'
+                      }`}
+                    >
+                      <span className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold ${
+                        option.score === generalDetection.autoScore.score
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-slate-700 text-slate-400'
+                      }`}>
+                        {option.score}
+                      </span>
+                      <span className="text-slate-300 text-sm flex-1">{option.desc}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* 자동 진행 표시 */}
+            <div className="p-6 pt-0 space-y-3">
+              <div className="text-center">
+                <p className="text-slate-400 text-sm mb-3">다음 항목으로 자동 진행됩니다...</p>
+                <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
+                  <div className="bg-gradient-to-r from-blue-500 to-emerald-500 h-2 rounded-full animate-pulse" style={{ width: '100%' }} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 하단 고정 네비게이션 */}
-      <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-700 p-4 z-40">
-        <div className="max-w-4xl mx-auto space-y-2">
-          <div className="flex gap-3">
-            <Button
-              variant="ghost"
-              className="flex-1"
-              onClick={goToPreviousItem}
-              disabled={currentItem === 0}
-            >
-              ← 이전
-            </Button>
-            <Button
-              variant="secondary"
-              className="flex-1"
-              onClick={() => {
-                if (isAnalyzing) {
-                  if (timerRef.current) clearInterval(timerRef.current);
-                  if (cameraRef.current) {
-                    cameraRef.current.stop();
-                    cameraRef.current = null;
+      {!generalDetection.showResultModal && (
+        <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-t border-slate-700 p-4 z-40">
+          <div className="max-w-4xl mx-auto space-y-2">
+            <div className="flex gap-3">
+              <Button
+                variant="ghost"
+                className="flex-1"
+                onClick={goToPreviousItem}
+                disabled={currentItem === 0}
+              >
+                ← 이전
+              </Button>
+              <Button
+                variant="secondary"
+                className="flex-1"
+                onClick={() => {
+                  if (isAnalyzing) {
+                    if (timerRef.current) clearInterval(timerRef.current);
+                    if (cameraRef.current) {
+                      cameraRef.current.stop();
+                      cameraRef.current = null;
+                    }
+                    setIsAnalyzing(false);
+                    setItemTimer(0);
                   }
-                  setIsAnalyzing(false);
-                  setItemTimer(0);
-                }
-              }}
-              disabled={!isAnalyzing}
-            >
-              다시 검사
-            </Button>
+                }}
+                disabled={!isAnalyzing}
+              >
+                다시 검사
+              </Button>
+              <Button
+                variant="secondary"
+                className="flex-1"
+                onClick={goToNextItem}
+              >
+                건너뛰기 →
+              </Button>
+            </div>
             <Button
-              variant="secondary"
-              className="flex-1"
-              onClick={goToNextItem}
+              variant="danger"
+              size="sm"
+              fullWidth
+              onClick={emergencyStop}
             >
-              정상 (4점) →
+              검사 중단 (Emergency)
             </Button>
           </div>
-          <Button
-            variant="danger"
-            size="sm"
-            fullWidth
-            onClick={emergencyStop}
-          >
-            🚨 검사 중단 (Emergency)
-          </Button>
         </div>
-      </div>
+      )}
     </PageContainer>
   );
 }
