@@ -53,7 +53,7 @@ export const BBS_ITEMS = [
     name: '지지 없이 앉아 있기',
     shortName: '앉아 있기',
     desc: '등받이 없이 발이 바닥에 닿은 상태로 2분간 앉아 있기',
-    instruction: '등받이 없는 의자나 치료대에 팔짱을 끼고 2분간 앉아 계세요.',
+    instruction: '등받이 없는 의자에 2분간 앉아 계세요.',
     duration: 120,
     detection: {
       type: 'sitting_duration',

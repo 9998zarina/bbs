@@ -688,7 +688,7 @@ function BBSTestPage() {
               newPhase = 'in_progress';
               startTime = now;
               status = '타이머 시작!';
-              message = `${targetDuration}초간 유지하세요`;
+              message = `2분간 앉아 계세요`;
             } else if (!isSitting) {
               newPhase = 'waiting';
               startTime = null;
@@ -696,22 +696,34 @@ function BBSTestPage() {
           } else if (prev.testPhase === 'in_progress') {
             elapsedTime = (now - startTime) / 1000;
             confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
-            status = `앉아 있음: ${Math.floor(elapsedTime)}초 / ${targetDuration}초`;
+            const minutes = Math.floor(elapsedTime / 60);
+            const seconds = Math.floor(elapsedTime % 60);
+            status = `앉아 있음: ${minutes}분 ${seconds}초`;
 
             if (!isSitting) {
-              postureStability = 'unstable';
-              message = '⚠️ 다시 앉아주세요!';
+              // 앉은 자세가 풀림 - 시간에 따라 점수 부여
+              newPhase = 'complete';
+              let score = 0;
+              if (elapsedTime >= 120) score = 4;
+              else if (elapsedTime >= 30) score = 2;
+              else if (elapsedTime >= 10) score = 1;
+              else score = 0;
+              autoScore = { score, reason: `${Math.floor(elapsedTime)}초간 앉아 있음` };
+              assessmentReport = { score, duration: elapsedTime, stability: 'interrupted' };
+              showResultModal = true;
+              status = `${Math.floor(elapsedTime)}초에서 중단`;
             } else {
-              message = `남은 시간: ${Math.ceil(targetDuration - elapsedTime)}초`;
+              const remaining = Math.ceil(targetDuration - elapsedTime);
+              message = `남은 시간: ${Math.floor(remaining / 60)}분 ${remaining % 60}초`;
             }
 
-            // 완료 조건
+            // 2분 완료 조건
             if (elapsedTime >= targetDuration) {
               newPhase = 'complete';
-              autoScore = { score: 4, reason: `${targetDuration}초간 안전하게 앉아 있음` };
+              autoScore = { score: 4, reason: '2분간 안전하게 앉아 있음 - 정상' };
               assessmentReport = { score: 4, duration: elapsedTime, stability: 'good' };
               showResultModal = true;
-              status = '✓ 완료!';
+              status = '✓ 2분 완료!';
             }
           }
           break;
@@ -1782,7 +1794,7 @@ function BBSTestPage() {
 
       switch (detection?.type) {
         case 'sitting_duration':
-          initialMessage = '등받이 없이 의자에 앉아주세요';
+          initialMessage = '등받이 없는 의자에 앉아주세요 (2분간 유지)';
           initialStatus = '앉은 자세 대기';
           break;
         case 'stand_to_sit':
