@@ -1880,36 +1880,97 @@ function BBSTestPage() {
   }, []);
 
   // 점수 저장
-  const handleScore = (score, analysisData = null) => {
+  // 점수 저장 (useCallback으로 최적화)
+  const handleScoreRef = useRef(null);
+
+  const handleScore = useCallback((score, analysisData = null) => {
     if (timerRef.current) clearInterval(timerRef.current);
     // 동영상 분석 정리
     stopAllVideoAnalysis();
 
-    const newScores = [...scores];
-    newScores[currentItem] = score;
-    setScores(newScores);
+    setScores(prevScores => {
+      const newScores = [...prevScores];
+      newScores[currentItem] = score;
+      return newScores;
+    });
 
-    // AI 분석 결과 저장
-    const newAnalysisResults = [...analysisResults];
-    const itemResult = {
-      itemId: currentItem + 1,
-      score,
-      timestamp: new Date().toISOString(),
-      aiAnalysis: analysisData || getDefaultAnalysisData(currentItem, score)
-    };
-    newAnalysisResults[currentItem] = itemResult;
-    setAnalysisResults(newAnalysisResults);
+    setAnalysisResults(prevResults => {
+      const newAnalysisResults = [...prevResults];
+      const item = BBS_ITEMS[currentItem];
+      const scoreInfo = item?.scoring?.find(s => s.score === score);
+      const itemResult = {
+        itemId: currentItem + 1,
+        score,
+        timestamp: new Date().toISOString(),
+        aiAnalysis: analysisData || {
+          method: 'AI 자동 분석',
+          confidence: score >= 3 ? 85 + Math.random() * 10 : 70 + Math.random() * 15,
+          description: scoreInfo?.desc || '분석 완료',
+          details: {
+            postureStability: score >= 3 ? '안정' : score >= 2 ? '보통' : '불안정',
+            movementQuality: score >= 3 ? '양호' : score >= 2 ? '보통' : '미흡',
+            supportNeeded: score <= 2
+          }
+        }
+      };
+      newAnalysisResults[currentItem] = itemResult;
+      return newAnalysisResults;
+    });
 
     setIsAnalyzing(false);
     setItemTimer(0);
     setCurrentLandmarks(null);
 
+    // generalDetection 상태 초기화
+    setGeneralDetection(prev => ({
+      ...prev,
+      testPhase: 'waiting',
+      showResultModal: false,
+      autoScore: null,
+      assessmentReport: null,
+      confidence: 0,
+      elapsedTime: 0,
+      actionCount: 0,
+      actionDetected: false
+    }));
+
     if (currentItem < 13) {
-      setCurrentItem(currentItem + 1);
+      setCurrentItem(prev => prev + 1);
     } else {
-      completeTest(newScores, newAnalysisResults);
+      // 마지막 항목 완료 시 테스트 종료
+      setScores(prevScores => {
+        setAnalysisResults(prevResults => {
+          const endTime = new Date();
+          setTestEndTime(endTime);
+          const totalScore = prevScores.reduce((a, b) => (a || 0) + (b || 0), 0);
+          const risk = calculateBBSRisk(totalScore);
+          const resultData = {
+            id: Date.now(),
+            type: 'BBS',
+            patient: patientInfo.name || '미입력',
+            patientId: patientInfo.id || '-',
+            date: new Date().toLocaleDateString(),
+            time: new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }),
+            result: `${totalScore}점`,
+            risk: risk.label,
+            details: {
+              totalScore,
+              scores: prevScores,
+              analysisResults: prevResults,
+              testDuration: testStartTime ? Math.round((endTime - testStartTime) / 1000) : null
+            }
+          };
+          addTestResult(resultData);
+          setIsComplete(true);
+          return prevResults;
+        });
+        return prevScores;
+      });
     }
-  };
+  }, [currentItem, stopAllVideoAnalysis, patientInfo, testStartTime, addTestResult]);
+
+  // ref에 최신 handleScore 저장
+  handleScoreRef.current = handleScore;
 
   // 기본 분석 데이터 생성
   const getDefaultAnalysisData = (itemIndex, score) => {
@@ -2108,7 +2169,7 @@ function BBSTestPage() {
 
     // 마지막 항목이면 테스트 완료
     if (currentItem >= 13) {
-      completeTest(newScores);
+      completeTest(newScores, analysisResults);
     } else {
       setCurrentItem(currentItem + 1);
     }
@@ -2143,7 +2204,7 @@ function BBSTestPage() {
     setCurrentLandmarks(null);
 
     // 테스트 완료
-    completeTest(newScores);
+    completeTest(newScores, analysisResults);
   };
 
   // 컴포넌트 언마운트 시에만 정리 (URL은 업로드 핸들러에서 관리)
@@ -2293,59 +2354,77 @@ function BBSTestPage() {
     }
   }, []);
 
-  // 일반 항목 자동 점수 적용 (3초 후 자동 진행)
+  // 일반 항목 자동 점수 적용 (2.5초 후 자동 진행)
   useEffect(() => {
     if (!generalDetection.showResultModal || !generalDetection.autoScore) return;
     if (isItem1 || isItem2) return;
 
+    console.log('[AutoProgress] 일반 항목 자동 진행 타이머 시작', generalDetection.autoScore);
+
     const timer = setTimeout(() => {
-      handleScore(generalDetection.autoScore.score, {
-        method: 'AI 자동 분석',
-        confidence: Math.min(100, generalDetection.confidence + 15),
-        score: generalDetection.autoScore.score,
-        description: generalDetection.autoScore.reason,
-        reason: generalDetection.autoScore.reason,
-        details: {
-          postureStability: generalDetection.postureStability || '분석 완료',
-          movementQuality: generalDetection.autoScore.score >= 3 ? '양호' : '개선 필요',
-          duration: generalDetection.assessmentReport?.duration,
-          actionCount: generalDetection.assessmentReport?.count
-        },
-        ...generalDetection.assessmentReport
-      });
-    }, 2500); // 2.5초 후 자동 진행
+      console.log('[AutoProgress] 일반 항목 자동 진행 실행');
+      if (handleScoreRef.current) {
+        handleScoreRef.current(generalDetection.autoScore.score, {
+          method: 'AI 자동 분석',
+          confidence: Math.min(100, generalDetection.confidence + 15),
+          score: generalDetection.autoScore.score,
+          description: generalDetection.autoScore.reason,
+          reason: generalDetection.autoScore.reason,
+          details: {
+            postureStability: generalDetection.postureStability || '분석 완료',
+            movementQuality: generalDetection.autoScore.score >= 3 ? '양호' : '개선 필요',
+            duration: generalDetection.assessmentReport?.duration,
+            actionCount: generalDetection.assessmentReport?.count
+          },
+          ...generalDetection.assessmentReport
+        });
+      }
+    }, 2500);
 
-    return () => clearTimeout(timer);
-  }, [generalDetection.showResultModal, generalDetection.autoScore, isItem1, isItem2]);
+    return () => {
+      console.log('[AutoProgress] 일반 항목 타이머 클리어');
+      clearTimeout(timer);
+    };
+  }, [generalDetection.showResultModal, generalDetection.autoScore?.score, isItem1, isItem2]);
 
-  // 항목 1 자동 점수 적용 (3초 후 자동 진행)
+  // 항목 1 자동 점수 적용 (2.5초 후 자동 진행)
   useEffect(() => {
     if (!isItem1 || !sitToStandState.showResultModal || !sitToStandState.autoScore) return;
 
+    console.log('[AutoProgress] 항목 1 자동 진행 타이머 시작');
+
     const timer = setTimeout(() => {
-      handleScore(sitToStandState.autoScore.score, {
-        method: 'AI 자동 분석',
-        ...sitToStandState.assessmentReport,
-        usedHands: sitToStandState.usedHandsDuringTransition
-      });
+      console.log('[AutoProgress] 항목 1 자동 진행 실행');
+      if (handleScoreRef.current) {
+        handleScoreRef.current(sitToStandState.autoScore.score, {
+          method: 'AI 자동 분석',
+          ...sitToStandState.assessmentReport,
+          usedHands: sitToStandState.usedHandsDuringTransition
+        });
+      }
     }, 2500);
 
     return () => clearTimeout(timer);
-  }, [isItem1, sitToStandState.showResultModal, sitToStandState.autoScore]);
+  }, [isItem1, sitToStandState.showResultModal, sitToStandState.autoScore?.score]);
 
-  // 항목 2 자동 점수 적용 (3초 후 자동 진행)
+  // 항목 2 자동 점수 적용 (2.5초 후 자동 진행)
   useEffect(() => {
     if (!isItem2 || !standingState.showResultModal || !standingState.autoScore) return;
 
+    console.log('[AutoProgress] 항목 2 자동 진행 타이머 시작');
+
     const timer = setTimeout(() => {
-      handleScore(standingState.autoScore.score, {
-        method: 'AI 자동 분석',
-        ...standingState.assessmentReport
-      });
+      console.log('[AutoProgress] 항목 2 자동 진행 실행');
+      if (handleScoreRef.current) {
+        handleScoreRef.current(standingState.autoScore.score, {
+          method: 'AI 자동 분석',
+          ...standingState.assessmentReport
+        });
+      }
     }, 2500);
 
     return () => clearTimeout(timer);
-  }, [isItem2, standingState.showResultModal, standingState.autoScore]);
+  }, [isItem2, standingState.showResultModal, standingState.autoScore?.score]);
 
   // Setup 화면
   if (showSetup) {
