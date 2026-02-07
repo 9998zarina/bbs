@@ -50,7 +50,7 @@ function calculateAngle(pointA, pointB, pointC) {
 }
 
 /**
- * 캔버스에 신체 각도 정보 그리기 (무릎, 발목, 엉덩이)
+ * 캔버스에 무릎 각도만 표시
  */
 function drawBodyAngles(ctx, landmarks, width, height) {
   if (!landmarks || landmarks.length < 33) return;
@@ -58,37 +58,16 @@ function drawBodyAngles(ctx, landmarks, width, height) {
   ctx.save();
 
   // 랜드마크 인덱스
-  // 11: 왼쪽 어깨, 12: 오른쪽 어깨
-  // 23: 왼쪽 엉덩이, 24: 오른쪽 엉덩이
-  // 25: 왼쪽 무릎, 26: 오른쪽 무릎
-  // 27: 왼쪽 발목, 28: 오른쪽 발목
-  // 31: 왼쪽 발, 32: 오른쪽 발
-
-  const leftShoulder = landmarks[11];
-  const rightShoulder = landmarks[12];
   const leftHip = landmarks[23];
   const rightHip = landmarks[24];
   const leftKnee = landmarks[25];
   const rightKnee = landmarks[26];
   const leftAnkle = landmarks[27];
   const rightAnkle = landmarks[28];
-  const leftFoot = landmarks[31];
-  const rightFoot = landmarks[32];
 
-  // 왼쪽 각도 계산
-  const leftHipAngle = calculateAngle(leftShoulder, leftHip, leftKnee);
+  // 무릎 각도 계산 (엉덩이-무릎-발목)
   const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
-  const leftAnkleAngle = calculateAngle(leftKnee, leftAnkle, leftFoot);
-
-  // 오른쪽 각도 계산
-  const rightHipAngle = calculateAngle(rightShoulder, rightHip, rightKnee);
   const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
-  const rightAnkleAngle = calculateAngle(rightKnee, rightAnkle, rightFoot);
-
-  // 평균 각도 (양쪽 평균)
-  const avgHipAngle = (leftHipAngle + rightHipAngle) / 2;
-  const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
-  const avgAnkleAngle = (leftAnkleAngle + rightAnkleAngle) / 2;
 
   // 각도 표시 헬퍼 함수
   const drawAngleLabel = (x, y, label, angle, color) => {
@@ -98,9 +77,9 @@ function drawBodyAngles(ctx, landmarks, width, height) {
     const py = y * height;
 
     // 배경
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
     ctx.beginPath();
-    ctx.roundRect(px - 45, py - 12, 90, 24, 6);
+    ctx.roundRect(px - 35, py - 12, 70, 24, 6);
     ctx.fill();
 
     // 테두리
@@ -110,40 +89,20 @@ function drawBodyAngles(ctx, landmarks, width, height) {
 
     // 텍스트
     ctx.fillStyle = color;
-    ctx.font = 'bold 11px Arial';
+    ctx.font = 'bold 12px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(`${label} ${Math.round(angle)}°`, px, py);
   };
 
-  // 왼쪽 엉덩이 각도 (파란색)
-  if (leftHipAngle) {
-    drawAngleLabel(leftHip.x - 0.08, leftHip.y, '엉덩이', leftHipAngle, '#60A5FA');
-  }
-
   // 왼쪽 무릎 각도 (노란색)
   if (leftKneeAngle) {
-    drawAngleLabel(leftKnee.x - 0.08, leftKnee.y, '무릎', leftKneeAngle, '#FBBF24');
-  }
-
-  // 왼쪽 발목 각도 (초록색)
-  if (leftAnkleAngle) {
-    drawAngleLabel(leftAnkle.x - 0.08, leftAnkle.y, '발목', leftAnkleAngle, '#34D399');
-  }
-
-  // 오른쪽 엉덩이 각도 (파란색)
-  if (rightHipAngle) {
-    drawAngleLabel(rightHip.x + 0.08, rightHip.y, '엉덩이', rightHipAngle, '#60A5FA');
+    drawAngleLabel(leftKnee.x - 0.06, leftKnee.y, '무릎', leftKneeAngle, '#FBBF24');
   }
 
   // 오른쪽 무릎 각도 (노란색)
   if (rightKneeAngle) {
-    drawAngleLabel(rightKnee.x + 0.08, rightKnee.y, '무릎', rightKneeAngle, '#FBBF24');
-  }
-
-  // 오른쪽 발목 각도 (초록색)
-  if (rightAnkleAngle) {
-    drawAngleLabel(rightAnkle.x + 0.08, rightAnkle.y, '발목', rightAnkleAngle, '#34D399');
+    drawAngleLabel(rightKnee.x + 0.06, rightKnee.y, '무릎', rightKneeAngle, '#FBBF24');
   }
 
   ctx.restore();
@@ -498,9 +457,34 @@ function BBSTestPage() {
 
     const now = Date.now();
 
+    // 정밀한 앉음/서있음 판단을 위한 무릎 각도 분석
+    const leftHip = landmarks[23];
+    const rightHip = landmarks[24];
+    const leftKnee = landmarks[25];
+    const rightKnee = landmarks[26];
+    const leftAnkle = landmarks[27];
+    const rightAnkle = landmarks[28];
+
+    // 무릎 각도 계산 (엉덩이-무릎-발목)
+    const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+    const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+    const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+
+    // 엉덩이와 무릎의 높이 비교
+    const hipY = (leftHip.y + rightHip.y) / 2;
+    const kneeY = (leftKnee.y + rightKnee.y) / 2;
+
+    // 정밀한 앉음 판단: 무릎 각도 < 130도 (앉으면 무릎이 굽혀짐)
+    const isPreciseSitting = avgKneeAngle < 130;
+    // 정밀한 서있음 판단: 무릎 각도 > 155도 (서면 무릎이 펴짐)
+    const isPreciseStanding = avgKneeAngle > 155;
+
     // 히스토리 저장
     analysisHistoryRef.current.push({
       ...sitStandAnalysis,
+      kneeAngle: avgKneeAngle,
+      isPreciseSitting,
+      isPreciseStanding,
       timestamp: now
     });
 
@@ -532,61 +516,42 @@ function BBSTestPage() {
       sittingConfidence = sitStandAnalysis.sitting?.confidence || 0;
       standingConfidence = sitStandAnalysis.standing?.confidence || 0;
 
-      // 단계 1: 앉기 대기 중
+      // 단계 1: 앉기 대기 중 - 무릎 각도로 정밀 판단
       if (prev.testPhase === 'waiting') {
-        if (sitStandAnalysis.state === PostureState.SITTING && sittingConfidence > 50) {
-          // 앉음 감지됨 - 1초간 유지되면 확정
+        if (isPreciseSitting) {
+          // 앉음 감지됨 - 0.5초간 유지되면 확정
           if (!sittingConfirmedAt) {
             sittingConfirmedAt = now;
-            newFeedback = { message: '앉은 자세 감지됨... 유지해주세요', type: 'info' };
-          } else if (now - sittingConfirmedAt > 1000) {
-            // 1초 이상 유지 - 확정
+            newFeedback = { message: `앉음 감지 (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
+          } else if (now - sittingConfirmedAt > 500) {
+            // 0.5초 이상 유지 - 확정
             newPhase = 'sitting_confirmed';
-            newFeedback = { message: '✓ 앉은 자세 확인! 이제 일어서세요', type: 'success' };
+            newFeedback = { message: '✓ 앉은 자세 확인! 일어서면 타이머 시작', type: 'success' };
           }
         } else {
           // 앉지 않음
           sittingConfirmedAt = null;
-          newFeedback = { message: '의자에 앉아주세요...', type: 'info' };
+          newFeedback = { message: `의자에 앉아주세요 (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
         }
       }
 
-      // 단계 2: 앉음 확인됨 - 일어서기 대기
+      // 단계 2: 앉음 확인됨 - 일어서면 바로 타이머 시작!
       if (prev.testPhase === 'sitting_confirmed') {
-        if (sitStandAnalysis.state === PostureState.STANDING && standingConfidence > 45) {
-          // 서있음 감지됨
-          if (!standingDetectedAt) {
-            standingDetectedAt = now;
-            newPhase = 'standing_up';
-            newFeedback = { message: '일어서는 중... 완전히 서면 타이머 시작!', type: 'info' };
-          }
-        } else if (sitStandAnalysis.state === PostureState.SITTING) {
-          // 여전히 앉아있음
-          newFeedback = { message: '이제 천천히 일어서세요!', type: 'success' };
+        if (isPreciseStanding) {
+          // 서있음 감지 - 즉시 타이머 시작!
+          standingStartTime = now;
+          standingDetectedAt = now;
+          newPhase = 'timing';
+          newFeedback = { message: '✓ 일어섬! 2분 타이머 시작', type: 'success' };
+        } else if (avgKneeAngle > 130 && avgKneeAngle <= 155) {
+          // 일어서는 중
+          newFeedback = { message: `일어서는 중... (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
+        } else {
+          newFeedback = { message: '천천히 일어서세요!', type: 'success' };
         }
       }
 
-      // 단계 3: 일어서는 중
-      if (prev.testPhase === 'standing_up') {
-        if (sitStandAnalysis.state === PostureState.STANDING && standingConfidence > 55) {
-          // 완전히 서있음 확인 - 0.8초간 유지되면 타이머 시작
-          if (standingDetectedAt && now - standingDetectedAt > 800) {
-            // 타이머 시작
-            standingStartTime = now;
-            newPhase = 'timing';
-            newFeedback = { message: '✓ 일어서기 완료! 2분간 유지해주세요', type: 'success' };
-          } else {
-            newFeedback = { message: '일어서기 확인 중...', type: 'info' };
-          }
-        } else if (sitStandAnalysis.state === PostureState.SITTING) {
-          // 다시 앉음
-          standingDetectedAt = null;
-          newPhase = 'sitting_confirmed';
-          newFeedback = { message: '다시 일어서세요!', type: 'warning' };
-        }
-      }
-
-      // 단계 4: 시간 측정 중 (2분)
+      // 단계 3: 시간 측정 중 (2분) - standing_up 단계 건너뜀
       if (prev.testPhase === 'timing') {
         if (standingStartTime) {
           standingDuration = (now - standingStartTime) / 1000;
