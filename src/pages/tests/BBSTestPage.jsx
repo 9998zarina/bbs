@@ -34,7 +34,123 @@ const speak = (text, rate = 1.0) => {
 };
 
 /**
- * 캔버스에 각도 정보 그리기
+ * 세 점 사이의 각도 계산 (도 단위)
+ */
+function calculateAngle(pointA, pointB, pointC) {
+  if (!pointA || !pointB || !pointC) return null;
+
+  const radians = Math.atan2(pointC.y - pointB.y, pointC.x - pointB.x) -
+                  Math.atan2(pointA.y - pointB.y, pointA.x - pointB.x);
+  let angle = Math.abs(radians * 180.0 / Math.PI);
+
+  if (angle > 180.0) {
+    angle = 360.0 - angle;
+  }
+  return angle;
+}
+
+/**
+ * 캔버스에 신체 각도 정보 그리기 (무릎, 발목, 엉덩이)
+ */
+function drawBodyAngles(ctx, landmarks, width, height) {
+  if (!landmarks || landmarks.length < 33) return;
+
+  ctx.save();
+
+  // 랜드마크 인덱스
+  // 11: 왼쪽 어깨, 12: 오른쪽 어깨
+  // 23: 왼쪽 엉덩이, 24: 오른쪽 엉덩이
+  // 25: 왼쪽 무릎, 26: 오른쪽 무릎
+  // 27: 왼쪽 발목, 28: 오른쪽 발목
+  // 31: 왼쪽 발, 32: 오른쪽 발
+
+  const leftShoulder = landmarks[11];
+  const rightShoulder = landmarks[12];
+  const leftHip = landmarks[23];
+  const rightHip = landmarks[24];
+  const leftKnee = landmarks[25];
+  const rightKnee = landmarks[26];
+  const leftAnkle = landmarks[27];
+  const rightAnkle = landmarks[28];
+  const leftFoot = landmarks[31];
+  const rightFoot = landmarks[32];
+
+  // 왼쪽 각도 계산
+  const leftHipAngle = calculateAngle(leftShoulder, leftHip, leftKnee);
+  const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+  const leftAnkleAngle = calculateAngle(leftKnee, leftAnkle, leftFoot);
+
+  // 오른쪽 각도 계산
+  const rightHipAngle = calculateAngle(rightShoulder, rightHip, rightKnee);
+  const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+  const rightAnkleAngle = calculateAngle(rightKnee, rightAnkle, rightFoot);
+
+  // 평균 각도 (양쪽 평균)
+  const avgHipAngle = (leftHipAngle + rightHipAngle) / 2;
+  const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+  const avgAnkleAngle = (leftAnkleAngle + rightAnkleAngle) / 2;
+
+  // 각도 표시 헬퍼 함수
+  const drawAngleLabel = (x, y, label, angle, color) => {
+    if (!angle || isNaN(angle)) return;
+
+    const px = x * width;
+    const py = y * height;
+
+    // 배경
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.beginPath();
+    ctx.roundRect(px - 45, py - 12, 90, 24, 6);
+    ctx.fill();
+
+    // 테두리
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 텍스트
+    ctx.fillStyle = color;
+    ctx.font = 'bold 11px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${label} ${Math.round(angle)}°`, px, py);
+  };
+
+  // 왼쪽 엉덩이 각도 (파란색)
+  if (leftHipAngle) {
+    drawAngleLabel(leftHip.x - 0.08, leftHip.y, '엉덩이', leftHipAngle, '#60A5FA');
+  }
+
+  // 왼쪽 무릎 각도 (노란색)
+  if (leftKneeAngle) {
+    drawAngleLabel(leftKnee.x - 0.08, leftKnee.y, '무릎', leftKneeAngle, '#FBBF24');
+  }
+
+  // 왼쪽 발목 각도 (초록색)
+  if (leftAnkleAngle) {
+    drawAngleLabel(leftAnkle.x - 0.08, leftAnkle.y, '발목', leftAnkleAngle, '#34D399');
+  }
+
+  // 오른쪽 엉덩이 각도 (파란색)
+  if (rightHipAngle) {
+    drawAngleLabel(rightHip.x + 0.08, rightHip.y, '엉덩이', rightHipAngle, '#60A5FA');
+  }
+
+  // 오른쪽 무릎 각도 (노란색)
+  if (rightKneeAngle) {
+    drawAngleLabel(rightKnee.x + 0.08, rightKnee.y, '무릎', rightKneeAngle, '#FBBF24');
+  }
+
+  // 오른쪽 발목 각도 (초록색)
+  if (rightAnkleAngle) {
+    drawAngleLabel(rightAnkle.x + 0.08, rightAnkle.y, '발목', rightAnkleAngle, '#34D399');
+  }
+
+  ctx.restore();
+}
+
+/**
+ * 캔버스에 각도 정보 그리기 (Item 1 전용)
  */
 function drawAngleInfo(ctx, analysis, landmarks, width, height) {
   if (!analysis || !landmarks) return;
@@ -43,38 +159,6 @@ function drawAngleInfo(ctx, analysis, landmarks, width, height) {
   if (!vizData) return;
 
   ctx.save();
-
-  // 무릎 각도 표시
-  if (vizData.kneeAngle) {
-    const kx = vizData.kneeAnglePosition.x * width;
-    const ky = vizData.kneeAnglePosition.y * height;
-
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.beginPath();
-    ctx.roundRect(kx - 35, ky - 25, 70, 25, 5);
-    ctx.fill();
-
-    ctx.fillStyle = '#FCD34D';
-    ctx.font = 'bold 12px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText(`무릎 ${Math.round(vizData.kneeAngle)}°`, kx, ky - 8);
-  }
-
-  // 엉덩이 각도 표시
-  if (vizData.hipAngle) {
-    const hx = vizData.hipAnglePosition.x * width;
-    const hy = vizData.hipAnglePosition.y * height;
-
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    ctx.beginPath();
-    ctx.roundRect(hx - 40, hy - 25, 80, 25, 5);
-    ctx.fill();
-
-    ctx.fillStyle = '#60A5FA';
-    ctx.font = 'bold 12px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText(`엉덩이 ${Math.round(vizData.hipAngle)}°`, hx, hy - 8);
-  }
 
   // 상태 표시 박스 (화면 중앙 상단)
   const stateText = analysis.state === PostureState.SITTING ? '앉음 감지' :
@@ -91,6 +175,9 @@ function drawAngleInfo(ctx, analysis, landmarks, width, height) {
   ctx.fillText(stateText, width / 2, 33);
 
   ctx.restore();
+
+  // 신체 각도 표시 (무릎, 발목, 엉덩이)
+  drawBodyAngles(ctx, landmarks, width, height);
 }
 
 function BBSTestPage() {
@@ -1155,8 +1242,12 @@ function BBSTestPage() {
                              analysis.stability === 'moderate' ? '#EAB308' :
                              analysis.stability === 'poor' ? '#F97316' : '#EF4444';
             }
+            // 항목 2 각도 표시
+            drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height);
           } else {
             handleGeneralAnalysis(results.poseLandmarks);
+            // 일반 항목 각도 표시
+            drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height);
           }
 
           // 스켈레톤 그리기
@@ -1480,6 +1571,9 @@ function BBSTestPage() {
           fillStyle: skeletonColor,
           radius: 5
         });
+
+        // 신체 각도 표시 (무릎, 발목, 엉덩이)
+        drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height);
       }
 
       ctx.restore();
