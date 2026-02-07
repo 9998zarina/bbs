@@ -516,42 +516,23 @@ function BBSTestPage() {
       sittingConfidence = sitStandAnalysis.sitting?.confidence || 0;
       standingConfidence = sitStandAnalysis.standing?.confidence || 0;
 
-      // 단계 1: 앉기 대기 중 - 무릎 각도로 정밀 판단
+      // 단계 1: 서있음 감지되면 바로 타이머 시작
       if (prev.testPhase === 'waiting') {
-        if (isPreciseSitting) {
-          // 앉음 감지됨 - 0.5초간 유지되면 확정
-          if (!sittingConfirmedAt) {
-            sittingConfirmedAt = now;
-            newFeedback = { message: `앉음 감지 (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
-          } else if (now - sittingConfirmedAt > 500) {
-            // 0.5초 이상 유지 - 확정
-            newPhase = 'sitting_confirmed';
-            newFeedback = { message: '✓ 앉은 자세 확인! 일어서면 타이머 시작', type: 'success' };
-          }
-        } else {
-          // 앉지 않음
-          sittingConfirmedAt = null;
-          newFeedback = { message: `의자에 앉아주세요 (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
-        }
-      }
-
-      // 단계 2: 앉음 확인됨 - 일어서면 바로 타이머 시작!
-      if (prev.testPhase === 'sitting_confirmed') {
         if (isPreciseStanding) {
           // 서있음 감지 - 즉시 타이머 시작!
           standingStartTime = now;
           standingDetectedAt = now;
           newPhase = 'timing';
-          newFeedback = { message: '✓ 일어섬! 2분 타이머 시작', type: 'success' };
-        } else if (avgKneeAngle > 130 && avgKneeAngle <= 160) {
-          // 일어서는 중
-          newFeedback = { message: `일어서는 중... (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
+          newFeedback = { message: '✓ 서있음 감지! 2분 타이머 시작', type: 'success' };
+        } else if (avgKneeAngle > 140 && avgKneeAngle <= 160) {
+          // 거의 서있음
+          newFeedback = { message: `무릎을 더 펴주세요 (${Math.round(avgKneeAngle)}°/160°)`, type: 'info' };
         } else {
-          newFeedback = { message: '천천히 일어서세요!', type: 'success' };
+          newFeedback = { message: `서 주세요 (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
         }
       }
 
-      // 단계 3: 시간 측정 중 (2분) - standing_up 단계 건너뜀
+      // 단계 2: 시간 측정 중 (2분)
       if (prev.testPhase === 'timing') {
         if (standingStartTime) {
           standingDuration = (now - standingStartTime) / 1000;
