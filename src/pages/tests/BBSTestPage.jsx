@@ -476,8 +476,8 @@ function BBSTestPage() {
 
     // 정밀한 앉음 판단: 무릎 각도 < 130도 (앉으면 무릎이 굽혀짐)
     const isPreciseSitting = avgKneeAngle < 130;
-    // 정밀한 서있음 판단: 무릎 각도 > 155도 (서면 무릎이 펴짐)
-    const isPreciseStanding = avgKneeAngle > 155;
+    // 정밀한 서있음 판단: 무릎 각도 > 160도 (서면 무릎이 펴짐)
+    const isPreciseStanding = avgKneeAngle > 160;
 
     // 히스토리 저장
     analysisHistoryRef.current.push({
@@ -543,7 +543,7 @@ function BBSTestPage() {
           standingDetectedAt = now;
           newPhase = 'timing';
           newFeedback = { message: '✓ 일어섬! 2분 타이머 시작', type: 'success' };
-        } else if (avgKneeAngle > 130 && avgKneeAngle <= 155) {
+        } else if (avgKneeAngle > 130 && avgKneeAngle <= 160) {
           // 일어서는 중
           newFeedback = { message: `일어서는 중... (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
         } else {
