@@ -464,7 +464,22 @@ export function analyzeStandingUnsupported(landmarks) {
  * @param {number} unstableTime - 불안정했던 시간 (초)
  * @param {number} attemptCount - 시도 횟수
  */
-export function calculateStandingScore(standingDuration, neededSupport, lostBalance, unstableTime, attemptCount = 1) {
+export function calculateStandingScore(standingDuration, neededSupport, lostBalance, unstableTime, attemptCount = 1, movementData = null) {
+  // 움직임 데이터 분석 (있는 경우)
+  let hasExcessiveMovement = false;
+  let movementDetails = '';
+  if (movementData) {
+    const lateralMovement = movementData.totalLateralMovement || 0;
+    const frontBackMovement = movementData.totalFrontBackMovement || 0;
+    const unstableEvents = movementData.unstableEvents || 0;
+
+    // 과도한 움직임 판단 (좌우 또는 앞뒤 움직임이 많은 경우)
+    hasExcessiveMovement = lateralMovement > 50 || frontBackMovement > 30 || unstableEvents > 10;
+    if (hasExcessiveMovement) {
+      movementDetails = `좌우:${lateralMovement.toFixed(1)}, 앞뒤:${frontBackMovement.toFixed(1)}, 불안정이벤트:${unstableEvents}`;
+    }
+  }
+
   // 균형을 잃었거나 30초를 버티지 못한 경우
   if (lostBalance || standingDuration < 30) {
     return {
@@ -493,13 +508,20 @@ export function calculateStandingScore(standingDuration, neededSupport, lostBala
   }
 
   // 2분(120초) 버텼지만 지지가 필요했거나 많이 흔들린 경우 (감독 필요)
-  if (standingDuration >= 120 && (neededSupport || unstableTime > 20)) {
+  // 움직임 데이터도 고려 (좌우/앞뒤 움직임이 과도한 경우)
+  if (standingDuration >= 120 && (neededSupport || unstableTime > 20 || hasExcessiveMovement)) {
+    let detailReason = '';
+    if (neededSupport) {
+      detailReason = '지지물을 찾으려는 행동 감지';
+    } else if (hasExcessiveMovement) {
+      detailReason = `과도한 움직임 감지 (${movementDetails})`;
+    } else {
+      detailReason = `불안정 시간: ${unstableTime.toFixed(1)}초`;
+    }
     return {
       score: 3,
       reason: '감독하에 2분간 서 있을 수 있음',
-      details: neededSupport
-        ? '지지물을 찾으려는 행동 감지'
-        : `불안정 시간: ${unstableTime.toFixed(1)}초`,
+      details: detailReason,
     };
   }
 
@@ -522,7 +544,7 @@ export function calculateStandingScore(standingDuration, neededSupport, lostBala
 /**
  * 평가 보고서 생성
  */
-export function generateStandingReport(score, standingDuration, stabilityData) {
+export function generateStandingReport(score, standingDuration, stabilityData, movementData = null) {
   const report = {
     itemNumber: 2,
     itemName: '잡지 않고 서 있기',
@@ -536,6 +558,10 @@ export function generateStandingReport(score, standingDuration, stabilityData) {
       standingTime: standingDuration.toFixed(1),
       avgStability: stabilityData.avgStability || 'N/A',
       supportSeekingEvents: stabilityData.supportEvents || 0,
+      // 움직임 데이터 추가
+      lateralMovement: movementData?.totalLateralMovement?.toFixed(1) || 'N/A',
+      frontBackMovement: movementData?.totalFrontBackMovement?.toFixed(1) || 'N/A',
+      unstableEvents: movementData?.unstableEvents || 0,
     },
   };
 

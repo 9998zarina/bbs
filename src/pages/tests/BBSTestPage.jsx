@@ -50,9 +50,9 @@ function calculateAngle(pointA, pointB, pointC) {
 }
 
 /**
- * 캔버스에 무릎 각도만 표시
+ * 캔버스에 무릎 각도 및 자세 정렬 표시
  */
-function drawBodyAngles(ctx, landmarks, width, height) {
+function drawBodyAngles(ctx, landmarks, width, height, showTrunkAlignment = false) {
   if (!landmarks || landmarks.length < 33) return;
 
   ctx.save();
@@ -64,10 +64,23 @@ function drawBodyAngles(ctx, landmarks, width, height) {
   const rightKnee = landmarks[26];
   const leftAnkle = landmarks[27];
   const rightAnkle = landmarks[28];
+  const leftShoulder = landmarks[11];
+  const rightShoulder = landmarks[12];
 
   // 무릎 각도 계산 (엉덩이-무릎-발목)
   const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
   const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+
+  // 자세 정렬 계산
+  const shoulderCenterX = (leftShoulder.x + rightShoulder.x) / 2;
+  const shoulderCenterY = (leftShoulder.y + rightShoulder.y) / 2;
+  const hipCenterX = (leftHip.x + rightHip.x) / 2;
+  const hipCenterY = (leftHip.y + rightHip.y) / 2;
+  const trunkLateralTilt = Math.abs(shoulderCenterX - hipCenterX) * 100;
+  const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y) * 100;
+  const hipTilt = Math.abs(leftHip.y - rightHip.y) * 100;
+  const alignmentScore = trunkLateralTilt + shoulderTilt + hipTilt;
+  const isAligned = alignmentScore < 5;
 
   // 각도 표시 헬퍼 함수
   const drawAngleLabel = (x, y, label, angle, color) => {
@@ -103,6 +116,46 @@ function drawBodyAngles(ctx, landmarks, width, height) {
   // 오른쪽 무릎 각도 (노란색)
   if (rightKneeAngle) {
     drawAngleLabel(rightKnee.x + 0.06, rightKnee.y, '무릎', rightKneeAngle, '#FBBF24');
+  }
+
+  // 자세 정렬 표시 (항목 3용)
+  if (showTrunkAlignment) {
+    // 어깨-엉덩이 수직선 표시
+    const shX = shoulderCenterX * width;
+    const shY = shoulderCenterY * height;
+    const hpX = hipCenterX * width;
+    const hpY = hipCenterY * height;
+
+    // 정렬선 그리기
+    ctx.strokeStyle = isAligned ? '#10B981' : '#EF4444';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(shX, shY);
+    ctx.lineTo(hpX, hpY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 정렬 점수 표시
+    const midY = (shY + hpY) / 2;
+    const alignColor = isAligned ? '#10B981' : alignmentScore < 8 ? '#FBBF24' : '#EF4444';
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.beginPath();
+    ctx.roundRect(10, midY - 25, 120, 50, 8);
+    ctx.fill();
+
+    ctx.strokeStyle = alignColor;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = alignColor;
+    ctx.font = 'bold 11px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(isAligned ? '✓ 자세 정렬됨' : '⚠ 자세 교정 필요', 18, midY - 8);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '10px Arial';
+    ctx.fillText(`기울기: ${alignmentScore.toFixed(1)}`, 18, midY + 10);
   }
 
   ctx.restore();
@@ -179,6 +232,14 @@ function BBSTestPage() {
   const [itemTimer, setItemTimer] = useState(0);
   const [currentLandmarks, setCurrentLandmarks] = useState(null);
 
+  // 합성 뷰 모드 (측면+정면 동시 표시)
+  const [combinedViewMode, setCombinedViewMode] = useState(false); // 합성 뷰 활성화 여부
+  const [combinedLayout, setCombinedLayout] = useState('side-by-side'); // 'side-by-side', 'overlay', 'pip'
+  const combinedCanvasRef = useRef(null); // 합성 캔버스
+  const combinedAnimationRef = useRef(null); // 합성 뷰 애니메이션 ID
+  const sideLandmarksRef = useRef(null); // 측면 랜드마크 저장
+  const frontLandmarksRef = useRef(null); // 정면 랜드마크 저장
+
   // 항목 1 전용 상태 - 단계별 검사 시스템
   // testPhase: 'waiting' -> 'sitting_confirmed' -> 'standing_up' -> 'complete'
   const [sitToStandState, setSitToStandState] = useState({
@@ -219,6 +280,13 @@ function BBSTestPage() {
     // 자세 분석
     currentPosture: 'unknown',
     postureStability: 'unknown',
+    // 항목 3 자세 안정성 추적
+    postureAligned: false,        // 어깨-엉덩이 정렬 여부
+    trunkTiltHistory: [],         // 몸통 기울기 이력
+    lateralShiftCount: 0,         // 좌우 흔들림 횟수
+    maxTrunkTilt: 0,              // 최대 기울기
+    stabilityScore: 100,          // 안정성 점수 (100점 시작, 감점)
+    initialTrunkAngle: null,      // 초기 몸통 각도 (기준점)
     // 완료 상태
     autoScore: null,
     assessmentReport: null,
@@ -245,6 +313,190 @@ function BBSTestPage() {
   const startTimeRef = useRef(null);
   const sideFileInputRef = useRef(null); // 측면 영상 파일 입력
   const frontFileInputRef = useRef(null); // 정면 영상 파일 입력
+
+  // 항목 2: 정면 영상 안정성 분석 결과 저장
+  const frontStabilityRef = useRef({
+    stability: 'good',
+    sway: 0,
+    lateralShift: 0,    // 좌우 흔들림
+    shoulderTilt: 0,    // 어깨 기울기
+    hipTilt: 0,         // 엉덩이 기울기
+    isUnstable: false,
+    lateralMovement: 0, // 좌우 움직임 (시간에 따른 변화)
+    frontBackMovement: 0 // 앞뒤 움직임
+  });
+
+  // 항목 2: 움직임 히스토리 추적 (좌우/앞뒤 움직임 감지용)
+  const movementHistoryRef = useRef({
+    positions: [],      // {x, y, bodySize, timestamp} 배열
+    maxHistory: 30,     // 최근 30프레임 저장 (약 1초)
+    baselineBodySize: null, // 기준 신체 크기 (앞뒤 움직임 기준점)
+    baselineX: null,    // 기준 X 위치 (좌우 움직임 기준점)
+    totalLateralMovement: 0,  // 누적 좌우 움직임
+    totalFrontBackMovement: 0, // 누적 앞뒤 움직임
+    unstableEvents: 0   // 불안정 이벤트 횟수
+  });
+
+  // 움직임 히스토리 및 안정성 데이터 초기화
+  const resetMovementHistory = useCallback(() => {
+    movementHistoryRef.current = {
+      positions: [],
+      maxHistory: 30,
+      baselineBodySize: null,
+      baselineX: null,
+      totalLateralMovement: 0,
+      totalFrontBackMovement: 0,
+      unstableEvents: 0
+    };
+    frontStabilityRef.current = {
+      stability: 'good',
+      sway: 0,
+      lateralShift: 0,
+      shoulderTilt: 0,
+      hipTilt: 0,
+      isUnstable: false,
+      lateralMovement: 0,
+      frontBackMovement: 0
+    };
+    console.log('[Item2] 움직임 히스토리 초기화');
+  }, []);
+
+  // 항목 4: 서서 앉기 분석용 (털썩 앉음 vs 천천히 앉음 감지)
+  const sittingAnalysisRef = useRef({
+    phase: 'waiting',        // waiting, standing, descending, seated
+    hipPositions: [],        // {y, timestamp} 배열 - 엉덩이 높이 추적
+    descentVelocities: [],   // 하강 속도 기록
+    maxVelocity: 0,          // 최대 하강 속도
+    finalVelocity: 0,        // 착석 직전 속도 (급격히 떨어지면 털썩)
+    isControlled: true,      // 조절된 앉기 여부
+    usedHands: false,        // 손 사용 여부
+    startTime: null,         // 앉기 시작 시간
+    endTime: null,           // 앉기 완료 시간
+    descentDuration: 0,      // 하강 소요 시간
+    score: null,             // AI 추천 점수
+    feedback: ''             // 피드백 메시지
+  });
+
+  // 항목 4 분석 리셋
+  const resetSittingAnalysis = useCallback(() => {
+    sittingAnalysisRef.current = {
+      phase: 'waiting',
+      hipPositions: [],
+      descentVelocities: [],
+      maxVelocity: 0,
+      finalVelocity: 0,
+      isControlled: true,
+      usedHands: false,
+      startTime: null,
+      endTime: null,
+      descentDuration: 0,
+      score: null,
+      feedback: ''
+    };
+    console.log('[Item4] 앉기 분석 초기화');
+  }, []);
+
+  // 항목 8: 팔 뻗기 측정용 (거리 측정 + 자 표시)
+  const armReachRef = useRef({
+    phase: 'waiting',           // waiting, standing, reaching, complete
+    initialFingerX: null,       // 초기 손끝 X 위치
+    initialShoulderX: null,     // 초기 어깨 X 위치
+    maxReachDistance: 0,        // 최대 뻗은 거리 (cm)
+    currentReachDistance: 0,    // 현재 뻗은 거리 (cm)
+    shoulderWidthPixels: 0,     // 어깨 너비 (픽셀) - 거리 계산 기준
+    pixelToCm: 0,               // 픽셀당 cm 비율
+    score: null,
+    feedback: ''
+  });
+
+  // 항목 8 상태
+  const [armReachState, setArmReachState] = useState({
+    phase: 'waiting',
+    currentReach: 0,
+    maxReach: 0,
+    feedback: { message: '서서 팔을 앞으로 뻗으세요', type: 'info' },
+    autoScore: null,
+    showResultModal: false
+  });
+
+  // 항목 8 분석 리셋
+  const resetArmReachAnalysis = useCallback(() => {
+    armReachRef.current = {
+      phase: 'waiting',
+      initialWristX: null,
+      initialShoulderX: null,
+      maxReachDistance: 0,
+      currentReachDistance: 0,
+      shoulderWidthPixels: 0,
+      pixelToCm: 0,
+      score: null,
+      feedback: ''
+    };
+    setArmReachState({
+      phase: 'waiting',
+      currentReach: 0,
+      maxReach: 0,
+      feedback: { message: '서서 팔을 앞으로 뻗으세요', type: 'info' },
+      autoScore: null,
+      showResultModal: false
+    });
+    console.log('[Item8] 팔 뻗기 분석 초기화');
+  }, []);
+
+  // 항목 9: 바닥 물건 집기 분석용
+  const pickUpRef = useRef({
+    phase: 'waiting',           // waiting, standing, bending, reaching, picked_up, returning, complete
+    objectDetected: false,      // 물건(동그라미) 감지 여부
+    objectPosition: null,       // 물건 위치 {x, y}
+    initialHandY: null,         // 초기 손 Y 위치
+    lowestHandY: null,          // 가장 낮은 손 Y 위치
+    pickedUp: false,            // 물건 집기 성공 여부
+    handReachedObject: false,   // 손이 물건에 도달했는지
+    returnedToStand: false,     // 다시 서있는 자세로 돌아왔는지
+    balanceLost: false,         // 균형 상실 여부
+    startTime: null,
+    endTime: null,
+    score: null,
+    feedback: ''
+  });
+
+  // 항목 9 상태
+  const [pickUpState, setPickUpState] = useState({
+    phase: 'waiting',
+    objectDetected: false,
+    pickedUp: false,
+    feedback: { message: '바닥의 물건(동그라미)을 인식 중...', type: 'info' },
+    autoScore: null,
+    showResultModal: false
+  });
+
+  // 항목 9 분석 리셋
+  const resetPickUpAnalysis = useCallback(() => {
+    pickUpRef.current = {
+      phase: 'waiting',
+      objectDetected: false,
+      objectPosition: null,
+      initialHandY: null,
+      lowestHandY: null,
+      pickedUp: false,
+      handReachedObject: false,
+      returnedToStand: false,
+      balanceLost: false,
+      startTime: null,
+      endTime: null,
+      score: null,
+      feedback: ''
+    };
+    setPickUpState({
+      phase: 'waiting',
+      objectDetected: false,
+      pickedUp: false,
+      feedback: { message: '바닥의 물건(동그라미)을 인식 중...', type: 'info' },
+      autoScore: null,
+      showResultModal: false
+    });
+    console.log('[Item9] 물건 집기 분석 초기화');
+  }, []);
 
   // 양쪽 영상 상태
   const [sideVideoProgress, setSideVideoProgress] = useState(0);
@@ -275,6 +527,9 @@ function BBSTestPage() {
   const currentBBSItem = BBS_ITEMS[currentItem];
   const isItem1 = currentItem === 0;
   const isItem2 = currentItem === 1;
+  const isItem4 = currentItem === 3; // 4번 검사: 서서 앉기
+  const isItem8 = currentItem === 7; // 8번 검사: 팔 뻗기
+  const isItem9 = currentItem === 8; // 9번 검사: 바닥 물건 집기
 
   // 항목 2 전용 상태 - 잡지 않고 서 있기
   // testPhase: 'waiting' -> 'sitting_confirmed' -> 'standing_up' -> 'timing' -> 'complete'
@@ -295,11 +550,27 @@ function BBSTestPage() {
     supportSeekingCount: 0,
     unstableTime: 0,
     lostBalance: false,
+    standingAttemptCount: 0, // 일어서기 시도 횟수
+    wasStanding: false, // 이전에 서있었는지 (시도 횟수 카운트용)
     feedback: { message: '의자에 앉아주세요...', type: 'info' },
     autoScore: null,
     assessmentReport: null,
     showResultModal: false,
     debug: null
+  });
+
+  // 항목 4 전용 상태 - 서서 앉기
+  const [sittingState, setSittingState] = useState({
+    phase: 'waiting', // waiting, standing, descending, seated
+    kneeAngle: 0,
+    isControlled: true,
+    usedHands: false,
+    descentDuration: 0,
+    maxVelocity: 0,
+    finalVelocity: 0,
+    feedback: { message: '서 있는 자세로 준비해주세요...', type: 'info' },
+    autoScore: null,
+    showResultModal: false
   });
 
   // 항목 1 전용 분석 - 단계별 검사
@@ -444,20 +715,1113 @@ function BBSTestPage() {
     return analysis;
   }, [sitToStandState.testPhase, sitToStandState.usedHandsDuringTransition]);
 
+  // 항목 2: 정면 영상 안정성 분석 (좌우/앞뒤 움직임 감지)
+  const analyzeItem2FrontStability = useCallback((landmarks) => {
+    if (!landmarks || landmarks.length < 33) {
+      return { stability: 'good', isUnstable: false };
+    }
+
+    const now = Date.now();
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+    const leftHip = landmarks[23];
+    const rightHip = landmarks[24];
+    const nose = landmarks[0];
+    const leftAnkle = landmarks[27];
+    const rightAnkle = landmarks[28];
+
+    // === 현재 프레임 분석 ===
+    // 1. 어깨 기울기 (좌우 어깨 높이 차이)
+    const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y) * 100;
+
+    // 2. 엉덩이 기울기 (좌우 엉덩이 높이 차이)
+    const hipTilt = Math.abs(leftHip.y - rightHip.y) * 100;
+
+    // 3. 상체 중심 X 위치
+    const bodyCenterX = (leftShoulder.x + rightShoulder.x + leftHip.x + rightHip.x) / 4;
+    const bodyCenterY = (leftShoulder.y + rightShoulder.y + leftHip.y + rightHip.y) / 4;
+    const lateralShift = Math.abs(nose.x - bodyCenterX) * 100;
+
+    // 4. 신체 크기 계산 (앞뒤 움직임 감지용 - 가까워지면 커지고 멀어지면 작아짐)
+    const shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+    const bodyHeight = Math.abs(bodyCenterY - ((leftAnkle.y + rightAnkle.y) / 2));
+    const bodySize = shoulderWidth * bodyHeight * 10000; // 스케일 조정
+
+    // === 움직임 히스토리 업데이트 ===
+    const history = movementHistoryRef.current;
+
+    // 새 위치 추가
+    history.positions.push({
+      x: bodyCenterX,
+      y: bodyCenterY,
+      bodySize: bodySize,
+      timestamp: now
+    });
+
+    // 오래된 데이터 제거 (최근 30프레임만 유지)
+    while (history.positions.length > history.maxHistory) {
+      history.positions.shift();
+    }
+
+    // === 움직임 분석 (최소 10프레임 이후부터) ===
+    let lateralMovement = 0;
+    let frontBackMovement = 0;
+    let movementDescription = '';
+
+    if (history.positions.length >= 10) {
+      // 기준점 설정 (처음 측정 시)
+      if (history.baselineX === null) {
+        history.baselineX = bodyCenterX;
+        history.baselineBodySize = bodySize;
+      }
+
+      // 최근 프레임들의 움직임 분석
+      const recentPositions = history.positions.slice(-10);
+
+      // 좌우 움직임: X 좌표의 표준편차 및 이동 범위
+      const xValues = recentPositions.map(p => p.x);
+      const xMin = Math.min(...xValues);
+      const xMax = Math.max(...xValues);
+      const xRange = (xMax - xMin) * 100; // 좌우 이동 범위
+
+      // X 좌표 변화량 (프레임 간 이동 거리 합)
+      let xMovementSum = 0;
+      for (let i = 1; i < recentPositions.length; i++) {
+        xMovementSum += Math.abs(recentPositions[i].x - recentPositions[i-1].x) * 100;
+      }
+      lateralMovement = xMovementSum + xRange;
+
+      // 앞뒤 움직임: 신체 크기 변화 (가까이/멀리)
+      const sizeValues = recentPositions.map(p => p.bodySize);
+      const sizeMin = Math.min(...sizeValues);
+      const sizeMax = Math.max(...sizeValues);
+      const avgSize = sizeValues.reduce((a, b) => a + b, 0) / sizeValues.length;
+      const sizeVariation = ((sizeMax - sizeMin) / avgSize) * 100; // 크기 변화율
+
+      // 신체 크기 변화량 (프레임 간 변화 합)
+      let sizeMovementSum = 0;
+      for (let i = 1; i < recentPositions.length; i++) {
+        sizeMovementSum += Math.abs(recentPositions[i].bodySize - recentPositions[i-1].bodySize) / avgSize * 100;
+      }
+      frontBackMovement = sizeMovementSum + sizeVariation;
+
+      // 누적 움직임 업데이트
+      history.totalLateralMovement += lateralMovement * 0.1; // 스케일 조정
+      history.totalFrontBackMovement += frontBackMovement * 0.1;
+
+      // 움직임 설명 생성
+      const movements = [];
+      if (lateralMovement > 3) movements.push('좌우');
+      if (frontBackMovement > 5) movements.push('앞뒤');
+      if (movements.length > 0) {
+        movementDescription = `${movements.join('/')} 움직임 감지`;
+      }
+
+      // 불안정 이벤트 카운트
+      if (lateralMovement > 5 || frontBackMovement > 8) {
+        history.unstableEvents++;
+      }
+    }
+
+    // === 종합 안정성 점수 계산 ===
+    // 정적 불안정성 (현재 자세)
+    const staticInstability = shoulderTilt + hipTilt + lateralShift;
+
+    // 동적 불안정성 (움직임)
+    const dynamicInstability = (lateralMovement * 0.5) + (frontBackMovement * 0.3);
+
+    // 종합 점수
+    const totalInstability = staticInstability + dynamicInstability;
+
+    let stability = 'excellent';
+    if (totalInstability > 20) stability = 'critical';
+    else if (totalInstability > 15) stability = 'poor';
+    else if (totalInstability > 10) stability = 'moderate';
+    else if (totalInstability > 5) stability = 'good';
+
+    const isUnstable = totalInstability > 12 || lateralMovement > 5 || frontBackMovement > 8;
+
+    // ref에 저장 (다른 분석에서 사용)
+    frontStabilityRef.current = {
+      stability,
+      sway: totalInstability,
+      lateralShift,
+      shoulderTilt,
+      hipTilt,
+      lateralMovement,
+      frontBackMovement,
+      totalLateralMovement: history.totalLateralMovement,
+      totalFrontBackMovement: history.totalFrontBackMovement,
+      unstableEvents: history.unstableEvents,
+      movementDescription,
+      isUnstable
+    };
+
+    // 움직임이 감지되면 로그 출력
+    if (lateralMovement > 2 || frontBackMovement > 3) {
+      console.log(`[Item2-정면] 안정성: ${stability} | 좌우: ${lateralMovement.toFixed(1)} | 앞뒤: ${frontBackMovement.toFixed(1)} | ${movementDescription}`);
+    }
+
+    return frontStabilityRef.current;
+  }, []);
+
+  // 항목 4 전용 분석 - 서서 앉기 (털썩 vs 천천히 앉기 감지)
+  // 영상 흐름: 앉아있음 → 일어섬 → 앉기 (앉기 동작 분석)
+  const handleItem4Analysis = useCallback((landmarks) => {
+    if (!landmarks || landmarks.length < 33) {
+      return sittingAnalysisRef.current;
+    }
+
+    const now = Date.now();
+    const analysis = sittingAnalysisRef.current;
+
+    // 랜드마크 추출
+    const leftHip = landmarks[23];
+    const rightHip = landmarks[24];
+    const leftKnee = landmarks[25];
+    const rightKnee = landmarks[26];
+    const leftAnkle = landmarks[27];
+    const rightAnkle = landmarks[28];
+    const leftWrist = landmarks[15];
+    const rightWrist = landmarks[16];
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+
+    // 엉덩이 Y 위치 (화면 좌표계: 아래로 갈수록 값 증가)
+    const hipY = (leftHip.y + rightHip.y) / 2;
+    const kneeY = (leftKnee.y + rightKnee.y) / 2;
+    const ankleY = (leftAnkle.y + rightAnkle.y) / 2;
+    const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+
+    // 무릎 각도 계산
+    const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+    const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+    const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+
+    // 서있음/앉음 판단 (무릎 각도 기준)
+    const isStanding = avgKneeAngle > 150;
+    const isSitting = avgKneeAngle < 110;
+    const isDescending = avgKneeAngle >= 110 && avgKneeAngle <= 150;
+
+    // 손 위치 분석 (팔걸이 사용 또는 무릎 짚기 감지)
+    // 하강 중에 손이 엉덩이/무릎 높이로 내려가면 손 사용
+    const leftWristBelowShoulder = leftWrist.y > leftShoulder.y + 0.1;
+    const rightWristBelowShoulder = rightWrist.y > rightShoulder.y + 0.1;
+    const leftWristNearKnee = Math.abs(leftWrist.y - kneeY) < 0.15;
+    const rightWristNearKnee = Math.abs(rightWrist.y - kneeY) < 0.15;
+    const leftWristNearHip = Math.abs(leftWrist.y - hipY) < 0.15;
+    const rightWristNearHip = Math.abs(rightWrist.y - hipY) < 0.15;
+
+    // 하강 중 손이 무릎/엉덩이 근처에 있으면 지지에 사용
+    const handsUsedForSupport = (leftWristBelowShoulder && (leftWristNearKnee || leftWristNearHip)) ||
+                                 (rightWristBelowShoulder && (rightWristNearKnee || rightWristNearHip));
+
+    // ===== 단계별 분석: 서있음 → 앉기 =====
+
+    // 1단계: 서있음 대기
+    if (analysis.phase === 'waiting') {
+      if (isStanding) {
+        // 서있음 감지! 앉기 분석 준비
+        analysis.phase = 'standing';
+        analysis.standingTime = now;
+        analysis.hipPositions = [];
+        analysis.descentVelocities = [];
+        analysis.maxVelocity = 0;
+        analysis.usedHands = false;
+        console.log('[Item4] 서있음 감지 - 앉기 분석 준비 완료');
+      }
+    }
+    // 2단계: 서있음 상태 - 앉기 시작 감지
+    else if (analysis.phase === 'standing') {
+      if (isDescending || isSitting) {
+        // 앉기 시작!
+        analysis.phase = 'descending';
+        analysis.startTime = now;
+        analysis.hipPositions = [{ y: hipY, timestamp: now }];
+        console.log('[Item4] 앉기 시작! 하강 속도 측정 중...');
+      }
+    }
+    // 4단계: 앉는 중 - 속도 및 손 사용 분석
+    else if (analysis.phase === 'descending') {
+      // 엉덩이 위치 추적
+      analysis.hipPositions.push({ y: hipY, timestamp: now });
+
+      // 최근 위치들로 속도 계산 (프레임 간 속도)
+      if (analysis.hipPositions.length >= 2) {
+        const positions = analysis.hipPositions;
+        const len = positions.length;
+
+        // 최근 2개 프레임으로 순간 속도 계산
+        const prev = positions[len - 2];
+        const curr = positions[len - 1];
+        const deltaY = (curr.y - prev.y) * 100; // 양수 = 하강
+        const deltaTime = (curr.timestamp - prev.timestamp) / 1000;
+
+        if (deltaTime > 0) {
+          const instantVelocity = deltaY / deltaTime;
+          analysis.descentVelocities.push(instantVelocity);
+
+          // 최대 속도 업데이트 (하강 시에만)
+          if (instantVelocity > analysis.maxVelocity) {
+            analysis.maxVelocity = instantVelocity;
+          }
+        }
+      }
+
+      // 손 사용 감지 (하강 중)
+      if (handsUsedForSupport && !analysis.usedHands) {
+        analysis.usedHands = true;
+        console.log('[Item4] 손 사용 감지 (팔걸이/무릎 지지)');
+      }
+
+      // 앉기 완료 감지
+      if (isSitting) {
+        analysis.phase = 'seated';
+        analysis.endTime = now;
+        analysis.descentDuration = (now - analysis.startTime) / 1000;
+
+        // 착석 직전 속도 (마지막 5프레임 평균)
+        if (analysis.descentVelocities.length >= 3) {
+          const lastVelocities = analysis.descentVelocities.slice(-5);
+          analysis.finalVelocity = lastVelocities.reduce((a, b) => a + b, 0) / lastVelocities.length;
+        }
+
+        // ===== 조절된 앉기 vs 털썩 앉기 판단 =====
+        // 기준:
+        // - 하강 시간 0.5초 미만: 너무 빠름 (털썩)
+        // - 착석 직전 속도 20 이상: 급정거 (털썩)
+        // - 최대 하강 속도 30 이상: 자유낙하에 가까움 (털썩)
+        const tooFast = analysis.descentDuration < 0.5;
+        const fastFinalVelocity = analysis.finalVelocity > 20;
+        const fastMaxVelocity = analysis.maxVelocity > 30;
+
+        analysis.isControlled = !tooFast && !fastFinalVelocity && !fastMaxVelocity;
+
+        // ===== 점수 계산 =====
+        // 4점: 손 최소 사용, 안전하게 앉음
+        // 3점: 손 사용하여 조절
+        // 2점: 다리 뒤쪽으로 의자 위치 확인하며 앉음 (여기서는 감지 어려움)
+        // 1점: 조절 안되고 털썩 앉음
+        // 0점: 도움 필요
+        let score = 4;
+        let feedback = '';
+
+        if (!analysis.isControlled) {
+          // 조절되지 않고 내려앉음 (털썩)
+          score = 1;
+          feedback = '⚠️ 조절되지 않고 털썩 앉음';
+          if (tooFast) feedback += ` (${analysis.descentDuration.toFixed(1)}초 - 너무 빠름)`;
+          if (fastFinalVelocity) feedback += ` (착석속도: ${analysis.finalVelocity.toFixed(1)})`;
+        } else if (analysis.usedHands) {
+          // 손 사용하여 조절
+          score = 3;
+          feedback = '손을 사용하여 조절하며 앉음';
+        } else {
+          // 안전하게 앉음
+          score = 4;
+          feedback = '✓ 손 사용 없이 안전하게 앉음';
+        }
+
+        analysis.score = score;
+        analysis.feedback = feedback;
+
+        console.log(`[Item4] 앉기 완료: ${feedback}`);
+        console.log(`  - 소요시간: ${analysis.descentDuration.toFixed(2)}초`);
+        console.log(`  - 최대속도: ${analysis.maxVelocity.toFixed(1)}, 착석속도: ${analysis.finalVelocity.toFixed(1)}`);
+        console.log(`  - 손사용: ${analysis.usedHands}, 조절됨: ${analysis.isControlled}`);
+        console.log(`  - AI 추천 점수: ${score}점`);
+      }
+    }
+
+    return {
+      phase: analysis.phase,
+      isStanding,
+      isSitting,
+      isDescending,
+      kneeAngle: avgKneeAngle,
+      usedHands: analysis.usedHands,
+      isControlled: analysis.isControlled,
+      descentDuration: analysis.descentDuration,
+      maxVelocity: analysis.maxVelocity,
+      finalVelocity: analysis.finalVelocity,
+      score: analysis.score,
+      feedback: analysis.feedback
+    };
+  }, []);
+
+  // 항목 8 전용 분석 - 팔 뻗기 거리 측정 (cm 단위)
+  // 어깨 너비를 기준으로 픽셀→cm 변환 (평균 어깨 너비 약 42cm 가정)
+  const AVERAGE_SHOULDER_WIDTH_CM = 42;
+
+  const handleItem8Analysis = useCallback((landmarks, canvasWidth, canvasHeight) => {
+    if (!landmarks || landmarks.length < 33) {
+      return armReachRef.current;
+    }
+
+    const analysis = armReachRef.current;
+
+    // 랜드마크 추출
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+    const leftHip = landmarks[23];
+    const rightHip = landmarks[24];
+    const leftWrist = landmarks[15];
+    const rightWrist = landmarks[16];
+    const leftElbow = landmarks[13];
+    const rightElbow = landmarks[14];
+    const leftAnkle = landmarks[27];
+    const rightAnkle = landmarks[28];
+    const leftKnee = landmarks[25];
+    const rightKnee = landmarks[26];
+    // 손가락 끝 (검지)
+    const leftIndex = landmarks[19];
+    const rightIndex = landmarks[20];
+
+    // 어깨 너비 (픽셀) - 거리 계산 기준
+    const shoulderWidthPixels = Math.abs(leftShoulder.x - rightShoulder.x) * canvasWidth;
+    analysis.shoulderWidthPixels = shoulderWidthPixels;
+
+    // 픽셀당 cm 비율 계산
+    analysis.pixelToCm = AVERAGE_SHOULDER_WIDTH_CM / shoulderWidthPixels;
+
+    // ===== 신체 수직 정렬 분석 (발목-무릎-엉덩이-어깨) =====
+    // 각 관절의 X 좌표 (수평 위치)
+    const ankleX = (leftAnkle.x + rightAnkle.x) / 2;
+    const kneeX = (leftKnee.x + rightKnee.x) / 2;
+    const hipX = (leftHip.x + rightHip.x) / 2;
+    const shoulderX = (leftShoulder.x + rightShoulder.x) / 2;
+
+    // 각 구간의 X축 편차 (수직 정렬 확인)
+    const ankleToKneeDeviation = Math.abs(ankleX - kneeX) * 100;
+    const kneeToHipDeviation = Math.abs(kneeX - hipX) * 100;
+    const hipToShoulderDeviation = Math.abs(hipX - shoulderX) * 100;
+
+    // 전체 수직 정렬 점수 (낮을수록 일자)
+    const bodyAlignmentScore = ankleToKneeDeviation + kneeToHipDeviation + hipToShoulderDeviation;
+    const isBodyAligned = bodyAlignmentScore < 15; // 15 이하면 수직 정렬
+
+    // 무릎 각도 (서있음 판단)
+    const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+    const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+    const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+    const isKneesStraight = avgKneeAngle > 160; // 무릎이 거의 펴짐
+
+    // 서있음 = 수직 정렬 + 무릎 펴짐
+    const isStanding = isBodyAligned && isKneesStraight;
+
+    // ===== 팔 일직선 분석 (어깨-팔꿈치-손목-손끝) =====
+    // 더 앞에 있는 손(X가 작은 쪽) 사용 - 측면 영상에서 앞쪽
+    const activeWrist = leftWrist.x < rightWrist.x ? leftWrist : rightWrist;
+    const activeShoulder = leftWrist.x < rightWrist.x ? leftShoulder : rightShoulder;
+    const activeElbow = leftWrist.x < rightWrist.x ? leftElbow : rightElbow;
+    const activeIndex = leftWrist.x < rightWrist.x ? leftIndex : rightIndex; // 손가락 끝
+
+    // 팔꿈치 각도 (어깨-팔꿈치-손목)
+    const elbowAngle = calculateAngle(activeShoulder, activeElbow, activeWrist);
+    const isArmStraight = elbowAngle > 160; // 160° 이상이면 일직선
+
+    // 팔이 수평으로 뻗어있는지 확인 (어깨와 손끝의 Y좌표 차이)
+    const armHorizontalDiff = Math.abs(activeShoulder.y - activeIndex.y) * 100;
+    const isArmHorizontal = armHorizontalDiff < 10; // 수평에 가까움
+
+    // 팔이 앞으로 뻗어있는지 (손끝이 어깨보다 앞에)
+    const isArmForward = activeIndex.x < activeShoulder.x;
+
+    // 팔 뻗기 상태 = 일직선 + 수평 + 앞으로
+    const isArmExtended = isArmStraight && isArmForward;
+
+    // 어깨 중심 X 위치
+    const shoulderCenterX = (leftShoulder.x + rightShoulder.x) / 2;
+
+    // 단계별 분석
+    if (analysis.phase === 'waiting') {
+      if (isStanding) {
+        analysis.phase = 'standing';
+        // 초기 위치 저장 (서있는 상태의 손끝 위치)
+        analysis.initialFingerX = activeIndex.x;
+        analysis.initialShoulderX = shoulderCenterX;
+        console.log(`[Item8] 서있음 감지 (정렬:${bodyAlignmentScore.toFixed(1)}, 무릎:${avgKneeAngle.toFixed(0)}°)`);
+      }
+    }
+    else if (analysis.phase === 'standing' || analysis.phase === 'reaching') {
+      if (!isKneesStraight) {
+        // 무릎이 구부러짐 - 리셋
+        analysis.phase = 'waiting';
+        analysis.feedback = '무릎을 펴고 서세요';
+      } else {
+        // 팔 뻗기 거리 계산 (손끝 기준)
+        // 측면 영상에서: X좌표가 작아질수록 앞으로 뻗은 것
+        const reachPixels = (analysis.initialFingerX - activeIndex.x) * canvasWidth;
+        const reachCm = reachPixels * analysis.pixelToCm;
+
+        // 양수만 취급 (앞으로 뻗은 경우만)
+        const currentReachCm = Math.max(0, reachCm);
+        analysis.currentReachDistance = currentReachCm;
+
+        // 최대 거리 업데이트
+        if (currentReachCm > analysis.maxReachDistance) {
+          analysis.maxReachDistance = currentReachCm;
+        }
+
+        // 상태 업데이트 (팔이 일직선으로 뻗어있을 때만)
+        if (isArmExtended && currentReachCm > 3) {
+          analysis.phase = 'reaching';
+
+          // 점수 계산 (실시간)
+          let score = 0;
+          let feedback = '';
+
+          if (analysis.maxReachDistance >= 25) {
+            score = 4;
+            feedback = `✓ 훌륭함! ${analysis.maxReachDistance.toFixed(1)}cm 도달`;
+          } else if (analysis.maxReachDistance >= 12.5) {
+            score = 3;
+            feedback = `좋음: ${analysis.maxReachDistance.toFixed(1)}cm (목표: 25cm)`;
+          } else if (analysis.maxReachDistance >= 5) {
+            score = 2;
+            feedback = `${analysis.maxReachDistance.toFixed(1)}cm (목표: 12.5cm 이상)`;
+          } else {
+            score = 1;
+            feedback = `${analysis.maxReachDistance.toFixed(1)}cm - 더 뻗어주세요`;
+          }
+
+          analysis.score = score;
+          analysis.feedback = feedback;
+        }
+
+        // 상태 업데이트
+        setArmReachState(prev => ({
+          ...prev,
+          phase: analysis.phase,
+          currentReach: currentReachCm,
+          maxReach: analysis.maxReachDistance,
+          feedback: {
+            message: analysis.feedback || `현재: ${currentReachCm.toFixed(1)}cm / 최대: ${analysis.maxReachDistance.toFixed(1)}cm`,
+            type: analysis.maxReachDistance >= 25 ? 'success' : analysis.maxReachDistance >= 12.5 ? 'warning' : 'info'
+          }
+        }));
+      }
+    }
+
+    return {
+      phase: analysis.phase,
+      isStanding,
+      isBodyAligned,
+      bodyAlignmentScore,
+      isKneesStraight,
+      avgKneeAngle,
+      isArmExtended,
+      isArmStraight,
+      elbowAngle,
+      isArmHorizontal,
+      armHorizontalDiff,
+      currentReachCm: analysis.currentReachDistance,
+      maxReachCm: analysis.maxReachDistance,
+      score: analysis.score,
+      feedback: analysis.feedback,
+      pixelToCm: analysis.pixelToCm,
+      shoulderWidthPixels: analysis.shoulderWidthPixels,
+      // 각도 정보 (화면 표시용)
+      landmarks: {
+        ankle: { x: ankleX * canvasWidth, y: ((leftAnkle.y + rightAnkle.y) / 2) * canvasHeight },
+        knee: { x: kneeX * canvasWidth, y: ((leftKnee.y + rightKnee.y) / 2) * canvasHeight },
+        hip: { x: hipX * canvasWidth, y: ((leftHip.y + rightHip.y) / 2) * canvasHeight },
+        shoulder: { x: shoulderX * canvasWidth, y: ((leftShoulder.y + rightShoulder.y) / 2) * canvasHeight },
+        elbow: { x: activeElbow.x * canvasWidth, y: activeElbow.y * canvasHeight },
+        wrist: { x: activeWrist.x * canvasWidth, y: activeWrist.y * canvasHeight }
+      }
+    };
+  }, []);
+
+  // 항목 8: 팔 뻗기 자(ruler) 그리기 - 뒤쪽(어깨/골반) 고정 자
+  const drawArmReachRuler = useCallback((ctx, landmarks, canvasWidth, canvasHeight, reachData) => {
+    if (!landmarks || !reachData || reachData.phase === 'waiting') return;
+
+    const leftWrist = landmarks[15];
+    const rightWrist = landmarks[16];
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+    const leftElbow = landmarks[13];
+    const rightElbow = landmarks[14];
+    const leftHip = landmarks[23];
+    const rightHip = landmarks[24];
+    const leftKnee = landmarks[25];
+    const rightKnee = landmarks[26];
+    const leftAnkle = landmarks[27];
+    const rightAnkle = landmarks[28];
+    // 손가락 끝 (검지)
+    const leftIndex = landmarks[19];
+    const rightIndex = landmarks[20];
+
+    // 더 앞에 있는 손 사용
+    const activeWrist = leftWrist.x < rightWrist.x ? leftWrist : rightWrist;
+    const activeShoulder = leftWrist.x < rightWrist.x ? leftShoulder : rightShoulder;
+    const activeElbow = leftWrist.x < rightWrist.x ? leftElbow : rightElbow;
+    const activeIndex = leftWrist.x < rightWrist.x ? leftIndex : rightIndex;
+
+    // 픽셀 좌표
+    const fingerX = activeIndex.x * canvasWidth;
+    const fingerY = activeIndex.y * canvasHeight;
+    const wristX = activeWrist.x * canvasWidth;
+    const wristY = activeWrist.y * canvasHeight;
+    const shoulderX = activeShoulder.x * canvasWidth;
+    const shoulderY = activeShoulder.y * canvasHeight;
+    const elbowX = activeElbow.x * canvasWidth;
+    const elbowY = activeElbow.y * canvasHeight;
+
+    // 신체 중심점 좌표 (발목, 무릎, 엉덩이, 어깨)
+    const ankleX = ((leftAnkle.x + rightAnkle.x) / 2) * canvasWidth;
+    const ankleY = ((leftAnkle.y + rightAnkle.y) / 2) * canvasHeight;
+    const kneeX = ((leftKnee.x + rightKnee.x) / 2) * canvasWidth;
+    const kneeY = ((leftKnee.y + rightKnee.y) / 2) * canvasHeight;
+    const hipX = ((leftHip.x + rightHip.x) / 2) * canvasWidth;
+    const hipY = ((leftHip.y + rightHip.y) / 2) * canvasHeight;
+    const bodyShoulderX = ((leftShoulder.x + rightShoulder.x) / 2) * canvasWidth;
+    const bodyShoulderY = ((leftShoulder.y + rightShoulder.y) / 2) * canvasHeight;
+
+    // ===== 고정된 뒤쪽 기준선 (어깨-골반 라인) =====
+    // 초기 어깨 X 위치 사용 (고정)
+    const fixedBackX = reachData.initialShoulderX ? reachData.initialShoulderX * canvasWidth : bodyShoulderX;
+    const rulerY = shoulderY; // 어깨 높이에 자 표시
+
+    // ===== 자(Ruler) 그리기 =====
+    ctx.save();
+
+    // ===== 1. 뒤쪽 고정 기준선 (어깨-골반 수직선) =====
+    // 고정된 뒤쪽 수직선 그리기
+    ctx.strokeStyle = '#FF6B6B';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(fixedBackX, bodyShoulderY - 50);
+    ctx.lineTo(fixedBackX, hipY + 50);
+    ctx.stroke();
+
+    // 기준선 라벨
+    ctx.fillStyle = 'rgba(255, 107, 107, 0.9)';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('기준선', fixedBackX, bodyShoulderY - 60);
+
+    // 어깨, 골반 포인트 표시
+    ctx.fillStyle = '#FF6B6B';
+    ctx.beginPath();
+    ctx.arc(fixedBackX, bodyShoulderY, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(fixedBackX, hipY, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ===== 2. 수평 자 (기준선에서 앞으로) =====
+    const pixelToCm = reachData.pixelToCm || 1;
+    const cmToPixel = 1 / pixelToCm;
+    const rulerLength = 35 * cmToPixel; // 35cm 길이 자
+
+    // 자 배경
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(fixedBackX - rulerLength - 10, rulerY - 35, rulerLength + 20, 70);
+
+    // 자 눈금선 (기준선에서 앞으로)
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(fixedBackX, rulerY);
+    ctx.lineTo(fixedBackX - rulerLength, rulerY);
+    ctx.stroke();
+
+    // 0cm 표시 (기준선 위치)
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('0', fixedBackX, rulerY + 25);
+
+    // 주요 눈금 표시 (5cm, 12.5cm, 25cm, 30cm)
+    const marks = [
+      { cm: 5, color: '#EF4444', label: '5' },
+      { cm: 12.5, color: '#F59E0B', label: '12.5' },
+      { cm: 25, color: '#10B981', label: '25' },
+      { cm: 30, color: '#8B5CF6', label: '30' }
+    ];
+
+    marks.forEach(mark => {
+      const markX = fixedBackX - (mark.cm * cmToPixel);
+      if (markX > fixedBackX - rulerLength) {
+        // 눈금선
+        ctx.strokeStyle = mark.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(markX, rulerY - 12);
+        ctx.lineTo(markX, rulerY + 12);
+        ctx.stroke();
+
+        // 눈금 라벨
+        ctx.fillStyle = mark.color;
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${mark.label}`, markX, rulerY + 28);
+      }
+    });
+
+    // ===== 3. 현재 손끝 위치 표시 (파란색 마커) =====
+    ctx.strokeStyle = '#00D4FF';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(fingerX, rulerY - 20);
+    ctx.lineTo(fingerX, rulerY + 20);
+    ctx.stroke();
+
+    // 손끝 포인트
+    ctx.fillStyle = '#00D4FF';
+    ctx.beginPath();
+    ctx.arc(fingerX, rulerY, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 기준선에서 손끝까지 연결선
+    ctx.strokeStyle = 'rgba(0, 212, 255, 0.5)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(fixedBackX, rulerY);
+    ctx.lineTo(fingerX, rulerY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 현재 거리 텍스트 (손끝 위)
+    ctx.fillStyle = '#00D4FF';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${reachData.currentReachCm?.toFixed(1) || 0}cm`, fingerX, rulerY - 30);
+
+    // ===== 4. 팔 연결선 (어깨-팔꿈치-손목-손끝) =====
+    ctx.strokeStyle = '#3B82F6';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(shoulderX, shoulderY);
+    ctx.lineTo(elbowX, elbowY);
+    ctx.lineTo(wristX, wristY);
+    ctx.lineTo(fingerX, fingerY);
+    ctx.stroke();
+
+    // 팔 관절점 표시
+    [{ x: shoulderX, y: shoulderY }, { x: elbowX, y: elbowY }, { x: wristX, y: wristY }, { x: fingerX, y: fingerY }].forEach(joint => {
+      ctx.fillStyle = '#3B82F6';
+      ctx.beginPath();
+      ctx.arc(joint.x, joint.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // ===== 5. 최대 거리 및 점수 표시 (왼쪽 상단) =====
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.fillRect(5, 5, 150, 75);
+
+    if (reachData.maxReachCm > 0) {
+      const maxColor = reachData.maxReachCm >= 25 ? '#10B981' :
+                       reachData.maxReachCm >= 12.5 ? '#F59E0B' : '#EF4444';
+      ctx.fillStyle = maxColor;
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(`최대: ${reachData.maxReachCm.toFixed(1)}cm`, 15, 28);
+
+      // 점수 표시
+      if (reachData.score !== null) {
+        ctx.fillStyle = maxColor;
+        ctx.font = 'bold 24px sans-serif';
+        ctx.fillText(`${reachData.score}점`, 15, 58);
+      }
+    } else {
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('팔을 앞으로 뻗으세요', 15, 35);
+    }
+
+    ctx.restore();
+  }, []);
+
+  // 항목 9: 바닥 물건 집기 분석
+  const handleItem9Analysis = useCallback((landmarks, canvasWidth, canvasHeight) => {
+    if (!landmarks || landmarks.length < 33) {
+      return pickUpRef.current;
+    }
+
+    const analysis = pickUpRef.current;
+
+    // 랜드마크 추출
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+    const leftHip = landmarks[23];
+    const rightHip = landmarks[24];
+    const leftKnee = landmarks[25];
+    const rightKnee = landmarks[26];
+    const leftAnkle = landmarks[27];
+    const rightAnkle = landmarks[28];
+    const leftWrist = landmarks[15];
+    const rightWrist = landmarks[16];
+    const leftIndex = landmarks[19];
+    const rightIndex = landmarks[20];
+
+    // 신체 중심 좌표
+    const shoulderY = ((leftShoulder.y + rightShoulder.y) / 2);
+    const hipY = ((leftHip.y + rightHip.y) / 2);
+    const kneeY = ((leftKnee.y + rightKnee.y) / 2);
+    const ankleY = ((leftAnkle.y + rightAnkle.y) / 2);
+
+    // 손 위치 (더 낮은 손 사용)
+    const activeHand = leftIndex.y > rightIndex.y ? leftIndex : rightIndex;
+    const handY = activeHand.y;
+    const handX = activeHand.x;
+
+    // 무릎 각도 계산
+    const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
+    const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
+    const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
+
+    // 허리 굽힘 감지 (어깨-엉덩이-무릎 각도)
+    const leftBendAngle = calculateAngle(leftShoulder, leftHip, leftKnee);
+    const rightBendAngle = calculateAngle(rightShoulder, rightHip, rightKnee);
+    const avgBendAngle = (leftBendAngle + rightBendAngle) / 2;
+
+    // 서있음 판단: 무릎 펴짐 + 허리 펴짐
+    const isStanding = avgKneeAngle > 150 && avgBendAngle > 150;
+    // 굽힘 판단: 허리 굽힘 또는 무릎 굽힘
+    const isBending = avgBendAngle < 120 || avgKneeAngle < 130;
+    // 손이 바닥 근처: 손이 발목보다 아래 또는 비슷한 높이
+    const handNearFloor = handY > ankleY - 0.05;
+    // 손이 바닥에 도달: 손이 발목 높이 이하
+    const handReachedFloor = handY > ankleY;
+
+    // 물건 위치 설정 (발 앞쪽 바닥)
+    if (!analysis.objectPosition) {
+      const footX = (leftAnkle.x + rightAnkle.x) / 2;
+      analysis.objectPosition = {
+        x: footX,
+        y: ankleY + 0.03 // 발목보다 약간 아래 (바닥)
+      };
+      analysis.objectDetected = true;
+    }
+
+    // 손과 물건 사이 거리 계산
+    const distanceToObject = Math.sqrt(
+      Math.pow((handX - analysis.objectPosition.x), 2) +
+      Math.pow((handY - analysis.objectPosition.y), 2)
+    );
+    const reachedObject = distanceToObject < 0.08; // 물건에 가까이 도달
+
+    // 초기 손 위치 저장
+    if (analysis.initialHandY === null && isStanding) {
+      analysis.initialHandY = handY;
+    }
+
+    // 가장 낮은 손 위치 업데이트
+    if (analysis.lowestHandY === null || handY > analysis.lowestHandY) {
+      analysis.lowestHandY = handY;
+    }
+
+    // 단계별 분석
+    if (analysis.phase === 'waiting') {
+      if (isStanding) {
+        analysis.phase = 'standing';
+        analysis.startTime = Date.now();
+        analysis.feedback = '서있는 자세 확인됨. 바닥의 물건을 집으세요.';
+        console.log('[Item9] 서있음 감지 - 물건 집기 대기');
+      }
+    }
+    else if (analysis.phase === 'standing') {
+      if (isBending) {
+        analysis.phase = 'bending';
+        analysis.feedback = '몸을 굽히는 중...';
+        console.log('[Item9] 굽힘 시작');
+      }
+    }
+    else if (analysis.phase === 'bending') {
+      if (handNearFloor) {
+        analysis.phase = 'reaching';
+        analysis.feedback = '손이 바닥에 가까워지는 중...';
+        console.log('[Item9] 바닥 도달 시도 중');
+      }
+    }
+    else if (analysis.phase === 'reaching') {
+      if (reachedObject) {
+        analysis.handReachedObject = true;
+        analysis.phase = 'picked_up';
+        analysis.pickedUp = true;
+        analysis.feedback = '물건 집기 성공! 다시 일어서세요.';
+        console.log('[Item9] 물건 집기 성공');
+      } else if (isStanding && !isBending) {
+        // 물건을 못 잡고 다시 일어섬
+        analysis.phase = 'returning';
+        analysis.pickedUp = false;
+        analysis.feedback = '물건을 집지 못하고 일어섬';
+        console.log('[Item9] 물건 못 집고 일어섬');
+      }
+    }
+    else if (analysis.phase === 'picked_up') {
+      if (isStanding && !isBending) {
+        analysis.phase = 'complete';
+        analysis.returnedToStand = true;
+        analysis.endTime = Date.now();
+
+        // 점수 계산
+        analysis.score = 4; // 성공적으로 집고 일어섬
+        analysis.feedback = '검사 완료! 4점 - 쉽고 안전하게 물건을 집었습니다.';
+        console.log('[Item9] 검사 완료 - 4점');
+      }
+    }
+    else if (analysis.phase === 'returning') {
+      if (isStanding) {
+        analysis.phase = 'complete';
+        analysis.returnedToStand = true;
+        analysis.endTime = Date.now();
+
+        // 손이 물건 가까이 갔는지에 따라 점수 결정
+        const lowestHandDistance = analysis.lowestHandY ?
+          Math.abs(analysis.lowestHandY - analysis.objectPosition.y) : 1;
+
+        if (lowestHandDistance < 0.05) {
+          // 물건 가까이 도달했지만 못 집음
+          analysis.score = 2;
+          analysis.feedback = '검사 완료! 2점 - 물건 근처까지 도달했으나 집지 못함';
+        } else {
+          // 물건에 도달하지 못함
+          analysis.score = 1;
+          analysis.feedback = '검사 완료! 1점 - 물건에 도달하지 못함';
+        }
+        console.log(`[Item9] 검사 완료 - ${analysis.score}점`);
+      }
+    }
+
+    // 상태 업데이트
+    setPickUpState(prev => ({
+      ...prev,
+      phase: analysis.phase,
+      objectDetected: analysis.objectDetected,
+      pickedUp: analysis.pickedUp,
+      feedback: { message: analysis.feedback, type: analysis.phase === 'complete' ? 'success' : 'info' },
+      autoScore: analysis.score,
+      showResultModal: analysis.phase === 'complete'
+    }));
+
+    return {
+      phase: analysis.phase,
+      objectPosition: analysis.objectPosition,
+      handPosition: { x: handX, y: handY },
+      isStanding,
+      isBending,
+      handNearFloor,
+      reachedObject,
+      pickedUp: analysis.pickedUp,
+      score: analysis.score,
+      feedback: analysis.feedback,
+      distanceToObject
+    };
+  }, []);
+
+  // 항목 9: 물건 집기 오버레이 그리기
+  const drawItem9Overlay = useCallback((ctx, landmarks, canvasWidth, canvasHeight, pickUpData) => {
+    if (!landmarks || !pickUpData) return;
+
+    ctx.save();
+
+    // 물건(동그라미) 위치
+    const objectPos = pickUpData.objectPosition;
+    if (objectPos) {
+      const objX = objectPos.x * canvasWidth;
+      const objY = objectPos.y * canvasHeight;
+      const objectRadius = 25;
+
+      // 물건 원 그리기
+      ctx.strokeStyle = pickUpData.pickedUp ? '#10B981' : '#FF6B6B';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(objX, objY, objectRadius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // 물건 안쪽 채우기
+      ctx.fillStyle = pickUpData.pickedUp ? 'rgba(16, 185, 129, 0.3)' : 'rgba(255, 107, 107, 0.3)';
+      ctx.fill();
+
+      // 물건 라벨
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('물건', objX, objY + 5);
+    }
+
+    // 손 위치 표시
+    const handPos = pickUpData.handPosition;
+    if (handPos) {
+      const handX = handPos.x * canvasWidth;
+      const handY = handPos.y * canvasHeight;
+
+      // 손 마커
+      ctx.fillStyle = pickUpData.handNearFloor ? '#00D4FF' : '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(handX, handY, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 손-물건 연결선
+      if (objectPos) {
+        const objX = objectPos.x * canvasWidth;
+        const objY = objectPos.y * canvasHeight;
+
+        ctx.strokeStyle = pickUpData.reachedObject ? '#10B981' : 'rgba(255, 255, 255, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(handX, handY);
+        ctx.lineTo(objX, objY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // 상태 표시 패널 (왼쪽 상단)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.fillRect(5, 5, 180, 100);
+
+    const phaseLabels = {
+      waiting: '대기 중...',
+      standing: '서있음 - 물건을 집으세요',
+      bending: '굽히는 중...',
+      reaching: '바닥 도달 중...',
+      picked_up: '성공! 일어서세요',
+      returning: '일어서는 중...',
+      complete: '검사 완료!'
+    };
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('물건 집기 검사', 15, 25);
+
+    const phaseColor = pickUpData.phase === 'complete' ? '#10B981' :
+                       pickUpData.phase === 'picked_up' ? '#10B981' : '#00D4FF';
+    ctx.fillStyle = phaseColor;
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(phaseLabels[pickUpData.phase] || '분석 중', 15, 45);
+
+    // 상태 아이콘
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillStyle = pickUpData.isStanding ? '#10B981' : '#F59E0B';
+    ctx.fillText(`서있음: ${pickUpData.isStanding ? '✓' : '✗'}`, 15, 65);
+
+    ctx.fillStyle = pickUpData.pickedUp ? '#10B981' : '#EF4444';
+    ctx.fillText(`물건집기: ${pickUpData.pickedUp ? '✓ 성공' : '✗'}`, 15, 82);
+
+    // 점수 표시
+    if (pickUpData.score !== null) {
+      const scoreColor = pickUpData.score >= 3 ? '#10B981' :
+                         pickUpData.score >= 2 ? '#F59E0B' : '#EF4444';
+      ctx.fillStyle = scoreColor;
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(`${pickUpData.score}점`, 130, 80);
+    }
+
+    ctx.restore();
+  }, []);
+
+  // 오버랩 합성 뷰 렌더링 - 측면+정면 영상을 겹쳐서 표시
+  const renderCombinedView = useCallback(() => {
+    const canvas = combinedCanvasRef.current;
+    const sideVideo = sideVideoRef.current;
+    const frontVideo = frontVideoRef.current;
+
+    if (!canvas) return;
+    if (!sideVideo && !frontVideo) return;
+
+    const ctx = canvas.getContext('2d');
+    const canvasWidth = canvas.width;
+    const canvasHeight = canvas.height;
+
+    // 캔버스 초기화
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+    // 두 영상을 반투명하게 겹쳐서 표시
+    ctx.globalAlpha = 0.7;
+
+    // 측면 영상 (녹색 계열)
+    if (sideVideo && sideVideo.readyState >= 2) {
+      ctx.drawImage(sideVideo, 0, 0, canvasWidth, canvasHeight);
+    }
+
+    // 정면 영상 (파란색 계열) - 스크린 블렌딩
+    if (frontVideo && frontVideo.readyState >= 2) {
+      ctx.globalCompositeOperation = 'lighten';
+      ctx.drawImage(frontVideo, 0, 0, canvasWidth, canvasHeight);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    ctx.globalAlpha = 1.0;
+
+    // 측면 스켈레톤 (녹색)
+    if (sideLandmarksRef.current) {
+      drawLandmarks(ctx, sideLandmarksRef.current, canvasWidth, canvasHeight, { color: '#22C55E', radius: 6 });
+      drawConnections(ctx, sideLandmarksRef.current, canvasWidth, canvasHeight, { color: '#22C55E', lineWidth: 3 });
+    }
+
+    // 정면 스켈레톤 (파란색)
+    if (frontLandmarksRef.current) {
+      drawLandmarks(ctx, frontLandmarksRef.current, canvasWidth, canvasHeight, { color: '#3B82F6', radius: 6 });
+      drawConnections(ctx, frontLandmarksRef.current, canvasWidth, canvasHeight, { color: '#3B82F6', lineWidth: 3 });
+    }
+
+    // 다음 프레임
+    combinedAnimationRef.current = requestAnimationFrame(renderCombinedView);
+  }, []);
+
+  // 합성 뷰 시작/중지
+  const startCombinedView = useCallback(() => {
+    if (combinedAnimationRef.current) {
+      cancelAnimationFrame(combinedAnimationRef.current);
+    }
+    renderCombinedView();
+  }, [renderCombinedView]);
+
+  const stopCombinedView = useCallback(() => {
+    if (combinedAnimationRef.current) {
+      cancelAnimationFrame(combinedAnimationRef.current);
+      combinedAnimationRef.current = null;
+    }
+  }, []);
+
+  // 분석 시작/중지 시 합성 뷰 자동 제어
+  useEffect(() => {
+    if (isAnalyzing && (sideVideoUrl || frontVideoUrl)) {
+      startCombinedView();
+    } else {
+      stopCombinedView();
+    }
+    return () => stopCombinedView();
+  }, [isAnalyzing, sideVideoUrl, frontVideoUrl, startCombinedView, stopCombinedView]);
+
   // 항목 2 전용 분석 - 잡지 않고 서 있기 (앉기 → 일어서기 → 2분 유지)
-  const handleItem2Analysis = useCallback((landmarks) => {
+  // viewType: 'side' = 자세 감지(무릎각도), 'front' = 안정성 분석
+  const handleItem2Analysis = useCallback((landmarks, viewType = 'side') => {
     if (!landmarks || landmarks.length < 33) {
       return { stability: 'good', isStanding: false, state: 'not_standing' };
     }
 
+    // 정면 영상인 경우 안정성만 분석하고 반환
+    if (viewType === 'front') {
+      return analyzeItem2FrontStability(landmarks);
+    }
+
+    // === 측면 영상: 자세 감지 (앉음/서있음) ===
     // 앉기/서기 분석 (Item 1과 동일한 분석 사용)
     const sitStandAnalysis = analyzeSitToStand(landmarks, previousAnalysisRef.current);
-    // 서있기 안정성 분석
+    // 서있기 안정성 분석 (기본 분석)
     const standingAnalysis = analyzeStandingUnsupported(landmarks);
+
+    // 정면 영상의 안정성 결과 가져오기
+    const frontStability = frontStabilityRef.current;
 
     const now = Date.now();
 
-    // 정밀한 앉음/서있음 판단을 위한 무릎 각도 분석
+    // 랜드마크 추출
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
     const leftHip = landmarks[23];
     const rightHip = landmarks[24];
     const leftKnee = landmarks[25];
@@ -465,26 +1829,50 @@ function BBSTestPage() {
     const leftAnkle = landmarks[27];
     const rightAnkle = landmarks[28];
 
-    // 무릎 각도 계산 (엉덩이-무릎-발목)
+    // 무릎 각도 계산 (엉덩이-무릎-발목) - 측면 영상 주요 분석
     const leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
     const rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
     const avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2;
 
-    // 엉덩이와 무릎의 높이 비교
-    const hipY = (leftHip.y + rightHip.y) / 2;
-    const kneeY = (leftKnee.y + rightKnee.y) / 2;
+    // ===== 앉음 판단: 무릎 각도 약 90도 (70~110도 범위) =====
+    const isPreciseSitting = avgKneeAngle >= 70 && avgKneeAngle <= 110;
 
-    // 정밀한 앉음 판단: 무릎 각도 < 130도 (앉으면 무릎이 굽혀짐)
-    const isPreciseSitting = avgKneeAngle < 130;
-    // 정밀한 서있음 판단: 무릎 각도 > 160도 (서면 무릎이 펴짐)
-    const isPreciseStanding = avgKneeAngle > 160;
+    // ===== 서있음 판단: 발목-무릎-엉덩이-어깨가 수직 일자 정렬 =====
+    // 각 관절의 X좌표 (수평 위치)
+    const ankleX = (leftAnkle.x + rightAnkle.x) / 2;
+    const kneeX = (leftKnee.x + rightKnee.x) / 2;
+    const hipX = (leftHip.x + rightHip.x) / 2;
+    const shoulderX = (leftShoulder.x + rightShoulder.x) / 2;
+
+    // 각 관절 간의 X축 편차 계산 (수직 정렬 확인)
+    const ankleToKneeDeviation = Math.abs(ankleX - kneeX);
+    const kneeToHipDeviation = Math.abs(kneeX - hipX);
+    const hipToShoulderDeviation = Math.abs(hipX - shoulderX);
+
+    // 전체 수직 정렬 점수 (낮을수록 일자에 가까움)
+    const verticalAlignmentScore = (ankleToKneeDeviation + kneeToHipDeviation + hipToShoulderDeviation) * 100;
+
+    // 수직 정렬 임계값: 15 이하면 일자로 서있음 (정규화된 좌표 기준)
+    const isVerticallyAligned = verticalAlignmentScore < 15;
+
+    // 무릎이 충분히 펴져 있는지 (140도 이상)
+    const isKneesStraight = avgKneeAngle > 140;
+
+    // 서있음 = 수직 정렬 + 무릎 펴짐
+    const isPreciseStanding = isVerticallyAligned && isKneesStraight;
+
+    // 디버그 정보 (측면 + 정면 안정성)
+    console.log(`[Item2-측면] 무릎: ${avgKneeAngle.toFixed(1)}°, 정렬: ${verticalAlignmentScore.toFixed(1)}, 앉음: ${isPreciseSitting}, 서있음: ${isPreciseStanding}, 정면안정성: ${frontStability.stability}`);
 
     // 히스토리 저장
     analysisHistoryRef.current.push({
       ...sitStandAnalysis,
       kneeAngle: avgKneeAngle,
+      verticalAlignment: verticalAlignmentScore,
       isPreciseSitting,
       isPreciseStanding,
+      isVerticallyAligned,
+      isKneesStraight,
       timestamp: now
     });
 
@@ -510,25 +1898,71 @@ function BBSTestPage() {
       let autoScore = prev.autoScore;
       let assessmentReport = prev.assessmentReport;
       let showResultModal = prev.showResultModal;
+      let standingAttemptCount = prev.standingAttemptCount;
+      let wasStanding = prev.wasStanding;
 
       // 자세 상태 업데이트
       currentPosture = sitStandAnalysis.state;
       sittingConfidence = sitStandAnalysis.sitting?.confidence || 0;
       standingConfidence = sitStandAnalysis.standing?.confidence || 0;
 
-      // 단계 1: 서있음 감지되면 바로 타이머 시작
-      if (prev.testPhase === 'waiting') {
-        if (isPreciseStanding) {
-          // 서있음 감지 - 즉시 타이머 시작!
+      // 일어서기 시도 횟수 추적 (앉음 → 서있음 전환 시 카운트)
+      if (isPreciseStanding && !wasStanding) {
+        standingAttemptCount = prev.standingAttemptCount + 1;
+        wasStanding = true;
+        console.log(`[Item2] 일어서기 시도 횟수: ${standingAttemptCount}`);
+      } else if (isPreciseSitting) {
+        wasStanding = false; // 다시 앉으면 리셋
+      }
+
+      // 검사 시작부터 경과 시간 계산 (최소 30초는 진행)
+      const testElapsedTime = startTimeRef.current ? (now - startTimeRef.current) / 1000 : 0;
+      const minimumTestDuration = 30; // 최소 30초는 검사 진행
+
+      // 3회 이상 시도 시 0점 처리 (단, 30초 이후에만 종료)
+      if (standingAttemptCount >= 3 && newPhase !== 'complete') {
+        if (testElapsedTime >= minimumTestDuration) {
+          // 30초 이상 경과 - 검사 종료
+          newPhase = 'complete';
+          autoScore = {
+            score: 0,
+            reason: `일어서기 ${standingAttemptCount}회 시도 - 3회 이상 시도로 0점`
+          };
+          assessmentReport = {
+            score: 0,
+            standingAttempts: standingAttemptCount,
+            reason: '여러 번 시도하여 일어서기에 어려움이 있음'
+          };
+          showResultModal = true;
+          newFeedback = { message: `⚠️ 일어서기 ${standingAttemptCount}회 시도 - 검사 종료`, type: 'error' };
+        } else {
+          // 30초 미만 - 경고만 표시하고 계속 진행
+          const remainingTime = Math.ceil(minimumTestDuration - testElapsedTime);
+          newFeedback = { message: `⚠️ ${standingAttemptCount}회 시도 (${remainingTime}초 후 종료 가능)`, type: 'warning' };
+        }
+      }
+
+      // 단계 1: 앉음 감지 후 서있음 감지되면 타이머 시작
+      if (prev.testPhase === 'waiting' && standingAttemptCount < 3) {
+        if (isPreciseSitting) {
+          // 앉은 자세 감지 (무릎 90도)
+          newFeedback = { message: `✓ 앉음 감지 (무릎 ${Math.round(avgKneeAngle)}°) - 이제 일어서세요`, type: 'success' };
+        } else if (isPreciseStanding) {
+          // 서있음 감지 (수직 정렬) - 타이머 시작!
           standingStartTime = now;
           standingDetectedAt = now;
           newPhase = 'timing';
-          newFeedback = { message: '✓ 서있음 감지! 2분 타이머 시작', type: 'success' };
-        } else if (avgKneeAngle > 140 && avgKneeAngle <= 160) {
-          // 거의 서있음
-          newFeedback = { message: `무릎을 더 펴주세요 (${Math.round(avgKneeAngle)}°/160°)`, type: 'info' };
+          const attemptMsg = standingAttemptCount > 1 ? ` (${standingAttemptCount}회차 시도)` : '';
+          newFeedback = { message: `✓ 서있음 감지!${attemptMsg} (정렬: ${verticalAlignmentScore.toFixed(1)}) 2분 타이머 시작`, type: 'success' };
+        } else if (isKneesStraight && !isVerticallyAligned) {
+          // 무릎은 펴졌지만 수직 정렬 안됨
+          newFeedback = { message: `자세를 바르게 세워주세요 (정렬: ${verticalAlignmentScore.toFixed(1)}/15)`, type: 'info' };
+        } else if (avgKneeAngle > 110 && avgKneeAngle <= 140) {
+          // 일어서는 중
+          newFeedback = { message: `일어서는 중... (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
         } else {
-          newFeedback = { message: `서 주세요 (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
+          // 대기 상태
+          newFeedback = { message: `의자에 앉아주세요 (무릎 ${Math.round(avgKneeAngle)}°)`, type: 'info' };
         }
       }
 
@@ -552,55 +1986,98 @@ function BBSTestPage() {
           newFeedback = { message: standingAnalysis.supportMessage || '⚠️ 균형 유지 중', type: 'warning' };
         }
 
-        // 불안정 시간 누적
-        if (standingAnalysis?.stability === 'poor' || standingAnalysis?.stability === 'critical') {
+        // 불안정 시간 누적 (측면 분석 + 정면 움직임 분석)
+        const isSideUnstable = standingAnalysis?.stability === 'poor' || standingAnalysis?.stability === 'critical';
+        const isFrontUnstable = frontStability.isUnstable ||
+                                frontStability.lateralMovement > 5 ||
+                                frontStability.frontBackMovement > 8;
+
+        if (isSideUnstable || isFrontUnstable) {
           unstableTime = prev.unstableTime + 0.1;
+
+          // 움직임 감지 피드백
+          if (frontStability.movementDescription && !standingAnalysis?.balanceLost) {
+            newFeedback = {
+              message: `⚠️ ${frontStability.movementDescription} (좌우:${frontStability.lateralMovement?.toFixed(1)}, 앞뒤:${frontStability.frontBackMovement?.toFixed(1)})`,
+              type: 'warning'
+            };
+          }
         }
 
-        // 균형 상실 감지
+        // 움직임 데이터 준비
+        const movementDataForScore = {
+          totalLateralMovement: frontStability.totalLateralMovement || 0,
+          totalFrontBackMovement: frontStability.totalFrontBackMovement || 0,
+          unstableEvents: frontStability.unstableEvents || 0
+        };
+
+        // 균형 상실 감지 (30초 이후에만 종료)
         if (standingAnalysis?.balanceLost) {
           lostBalance = true;
-          newPhase = 'complete';
-          autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, true, unstableTime, 1);
-          assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
-            avgStability: standingAnalysis.stability,
-            supportEvents: supportSeekingCount
-          });
-          showResultModal = true;
-          newFeedback = { message: '⚠️ 균형 상실 감지', type: 'error' };
+          if (testElapsedTime >= minimumTestDuration) {
+            newPhase = 'complete';
+            autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, true, unstableTime, 1, movementDataForScore);
+            assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
+              avgStability: standingAnalysis.stability,
+              supportEvents: supportSeekingCount
+            }, movementDataForScore);
+            showResultModal = true;
+            newFeedback = { message: '⚠️ 균형 상실 감지', type: 'error' };
+          } else {
+            newFeedback = { message: '⚠️ 균형 유지하세요! (검사 계속 진행)', type: 'warning' };
+          }
         }
-        // 목표 시간 달성 확인
+        // 목표 시간 달성 확인 (2분)
         else if (standingDuration >= prev.targetDuration) {
           newPhase = 'complete';
-          autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, false, unstableTime, 1);
+          autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, false, unstableTime, 1, movementDataForScore);
           assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
             avgStability: standingAnalysis?.stability || 'good',
             supportEvents: supportSeekingCount
-          });
+          }, movementDataForScore);
           showResultModal = true;
           newFeedback = { message: '✓ 2분 완료! 훌륭합니다!', type: 'success' };
         }
-        // 앉아버린 경우 (타이머 진행 중에)
+        // 앉아버린 경우 (타이머 진행 중에, 30초 이후에만 종료)
         else if (sitStandAnalysis.state === PostureState.SITTING && standingDuration >= 10) {
-          newPhase = 'complete';
-          autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, false, unstableTime, 1);
-          assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
-            avgStability: standingAnalysis?.stability || 'good',
-            supportEvents: supportSeekingCount
-          });
-          showResultModal = true;
-          newFeedback = { message: `${standingDuration.toFixed(1)}초간 서 있음 - 앉음 감지됨`, type: 'info' };
+          if (testElapsedTime >= minimumTestDuration) {
+            newPhase = 'complete';
+            autoScore = calculateStandingScore(standingDuration, supportSeekingCount > 5, false, unstableTime, 1, movementDataForScore);
+            assessmentReport = generateStandingReport(autoScore.score, standingDuration, {
+              avgStability: standingAnalysis?.stability || 'good',
+              supportEvents: supportSeekingCount
+            }, movementDataForScore);
+            showResultModal = true;
+            newFeedback = { message: `${standingDuration.toFixed(1)}초간 서 있음 - 앉음 감지됨`, type: 'info' };
+          } else {
+            // 30초 미만 - 다시 일어나도록 안내
+            newFeedback = { message: '다시 일어서세요! (검사 계속 진행)', type: 'warning' };
+          }
         }
-        // 진행 중 피드백
+        // 진행 중 피드백 (측면 안정성 + 정면 움직임)
         else {
           const remaining = Math.ceil(prev.targetDuration - standingDuration);
-          const stability = standingAnalysis?.stability || 'good';
-          if (stability === 'excellent' || stability === 'good') {
-            newFeedback = { message: `안정적! 남은 시간: ${remaining}초`, type: 'success' };
-          } else if (stability === 'moderate') {
-            newFeedback = { message: `약간 흔들림 - 남은 시간: ${remaining}초`, type: 'warning' };
+          const sideStability = standingAnalysis?.stability || 'good';
+          const frontStabilityLevel = frontStability.stability || 'good';
+
+          // 종합 안정성 판단
+          const hasSignificantMovement = frontStability.lateralMovement > 3 || frontStability.frontBackMovement > 5;
+          const isOverallStable = (sideStability === 'excellent' || sideStability === 'good') &&
+                                  (frontStabilityLevel === 'excellent' || frontStabilityLevel === 'good') &&
+                                  !hasSignificantMovement;
+          const isOverallModerate = sideStability === 'moderate' || frontStabilityLevel === 'moderate' || hasSignificantMovement;
+
+          if (isOverallStable) {
+            newFeedback = { message: `✓ 안정적! 남은 시간: ${remaining}초`, type: 'success' };
+          } else if (isOverallModerate) {
+            // 움직임 정보 표시
+            const movementInfo = [];
+            if (frontStability.lateralMovement > 3) movementInfo.push(`좌우:${frontStability.lateralMovement.toFixed(1)}`);
+            if (frontStability.frontBackMovement > 5) movementInfo.push(`앞뒤:${frontStability.frontBackMovement.toFixed(1)}`);
+            const movementStr = movementInfo.length > 0 ? ` (${movementInfo.join(', ')})` : '';
+            newFeedback = { message: `약간 흔들림${movementStr} - 남은: ${remaining}초`, type: 'warning' };
           } else {
-            newFeedback = { message: `⚠️ 불안정 - 균형 유지하세요!`, type: 'error' };
+            newFeedback = { message: `⚠️ 불안정 - 균형 유지하세요! (${remaining}초)`, type: 'error' };
           }
         }
       }
@@ -622,10 +2099,20 @@ function BBSTestPage() {
         supportSeekingCount,
         unstableTime,
         lostBalance,
+        standingAttemptCount,
+        wasStanding,
         feedback: newFeedback,
         autoScore,
         assessmentReport,
         showResultModal,
+        // 움직임 분석 데이터 추가
+        movementData: {
+          lateralMovement: frontStability.lateralMovement || 0,
+          frontBackMovement: frontStability.frontBackMovement || 0,
+          totalLateralMovement: frontStability.totalLateralMovement || 0,
+          totalFrontBackMovement: frontStability.totalFrontBackMovement || 0,
+          unstableEvents: frontStability.unstableEvents || 0
+        },
         debug: standingAnalysis?.debug
       };
     });
@@ -680,6 +2167,33 @@ function BBSTestPage() {
       Math.abs(rightWrist.z - rightShoulder.z)
     );
 
+    // ===== 항목 3: 자세 정렬 및 안정성 계산 =====
+    // 어깨 중심점
+    const shoulderCenterX = (leftShoulder.x + rightShoulder.x) / 2;
+    const shoulderCenterY = (leftShoulder.y + rightShoulder.y) / 2;
+    // 엉덩이 중심점
+    const hipCenterX = (leftHip.x + rightHip.x) / 2;
+    const hipCenterY = (leftHip.y + rightHip.y) / 2;
+
+    // 몸통 측면 기울기 (어깨-엉덩이 수직선 대비 각도)
+    // X축 차이가 클수록 좌우로 기울어진 것
+    const trunkLateralTilt = Math.abs(shoulderCenterX - hipCenterX) * 100; // 0에 가까울수록 정렬됨
+
+    // 어깨 수평 정렬 (좌우 어깨 높이 차이)
+    const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y) * 100;
+
+    // 엉덩이 수평 정렬 (좌우 엉덩이 높이 차이)
+    const hipTilt = Math.abs(leftHip.y - rightHip.y) * 100;
+
+    // 전체 정렬 점수 (낮을수록 좋음)
+    const alignmentScore = trunkLateralTilt + shoulderTilt + hipTilt;
+
+    // 정렬된 상태: 기울기가 5 이하면 정렬된 것으로 판단
+    const isPostureAligned = alignmentScore < 5;
+
+    // 흔들림 감지: 기울기가 8 이상이면 흔들림으로 판단
+    const isPostureShifted = alignmentScore > 8;
+
     const detection = currentBBSItem.detection;
     const targetDuration = currentBBSItem.duration || 0;
 
@@ -698,96 +2212,276 @@ function BBSTestPage() {
       let showResultModal = prev.showResultModal;
       let currentPosture = prev.currentPosture;
       let postureStability = 'good';
+      // 항목 3 자세 추적용 변수
+      let postureAligned = prev.postureAligned;
+      let trunkTiltHistory = [...prev.trunkTiltHistory];
+      let lateralShiftCount = prev.lateralShiftCount;
+      let maxTrunkTilt = prev.maxTrunkTilt;
+      let stabilityScore = prev.stabilityScore;
+      let initialTrunkAngle = prev.initialTrunkAngle;
 
       // 현재 자세 업데이트
       currentPosture = isStanding ? 'standing' : isSitting ? 'sitting' : 'unknown';
 
       // 항목별 분석 로직
       switch (detection.type) {
-        // 항목 3: 지지 없이 앉아 있기 (2분)
+        // 항목 3: 지지 없이 앉아 있기 (2분) - 자세 정렬 및 안정성 기반
         case 'sitting_duration':
           if (prev.testPhase === 'waiting') {
             if (isSitting) {
-              newPhase = 'detecting';
-              status = '앉은 자세 감지 중...';
-              message = '앉은 자세를 유지하면 타이머가 시작됩니다';
-              startTime = now;
+              // 앉은 상태 감지 - 정렬 확인
+              if (isPostureAligned) {
+                newPhase = 'detecting';
+                status = '✓ 바른 자세 감지!';
+                message = '자세를 유지하면 타이머가 시작됩니다';
+                startTime = now;
+                postureAligned = true;
+                initialTrunkAngle = alignmentScore;
+              } else {
+                status = `자세 정렬 중... (기울기: ${alignmentScore.toFixed(1)})`;
+                message = '어깨와 엉덩이를 일자로 맞춰주세요';
+                postureAligned = false;
+              }
             } else {
               status = '의자에 앉아주세요';
-              message = '등받이 없이 앉아주세요';
+              message = '등받이 없이 바른 자세로 앉아주세요';
+              postureAligned = false;
             }
           } else if (prev.testPhase === 'detecting') {
-            if (isSitting && now - startTime > 1000) {
+            // 정렬된 자세로 1초 유지하면 타이머 시작
+            if (isSitting && isPostureAligned && now - startTime > 1000) {
               newPhase = 'in_progress';
               startTime = now;
-              status = '타이머 시작!';
-              message = `2분간 앉아 계세요`;
+              status = '✓ 타이머 시작!';
+              message = '2분간 바른 자세로 앉아 계세요';
+              // 안정성 추적 초기화
+              trunkTiltHistory = [];
+              lateralShiftCount = 0;
+              maxTrunkTilt = 0;
+              stabilityScore = 100;
+              initialTrunkAngle = alignmentScore;
             } else if (!isSitting) {
               newPhase = 'waiting';
               startTime = null;
+              postureAligned = false;
+            } else if (!isPostureAligned) {
+              // 정렬이 풀림 - 다시 대기
+              status = '자세가 흐트러졌습니다';
+              message = '어깨와 엉덩이를 일자로 맞춰주세요';
+              startTime = now; // 타이머 리셋
             }
           } else if (prev.testPhase === 'in_progress') {
             elapsedTime = (now - startTime) / 1000;
             confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
             const minutes = Math.floor(elapsedTime / 60);
             const seconds = Math.floor(elapsedTime % 60);
-            status = `앉아 있음: ${minutes}분 ${seconds}초`;
+
+            // 자세 안정성 추적
+            trunkTiltHistory.push(alignmentScore);
+            if (trunkTiltHistory.length > 60) trunkTiltHistory.shift(); // 최근 60개만 유지
+
+            // 최대 기울기 업데이트
+            if (alignmentScore > maxTrunkTilt) {
+              maxTrunkTilt = alignmentScore;
+            }
+
+            // 흔들림 감지 및 감점
+            if (isPostureShifted) {
+              lateralShiftCount++;
+              // 흔들림당 1점 감점 (최대 20점까지)
+              if (lateralShiftCount % 30 === 0) { // 약 1초에 1회 체크
+                stabilityScore = Math.max(0, stabilityScore - 5);
+              }
+              status = `⚠️ 자세 흔들림! ${minutes}분 ${seconds}초 (안정성: ${stabilityScore}%)`;
+              message = '자세를 바르게 유지하세요';
+              postureStability = 'unstable';
+            } else {
+              status = `앉아 있음: ${minutes}분 ${seconds}초 (안정성: ${stabilityScore}%)`;
+              const remaining = Math.ceil(targetDuration - elapsedTime);
+              message = `남은 시간: ${Math.floor(remaining / 60)}분 ${remaining % 60}초`;
+              postureStability = 'good';
+            }
 
             if (!isSitting) {
-              // 앉은 자세가 풀림 - 시간에 따라 점수 부여
+              // 앉은 자세가 풀림 - 시간과 안정성에 따라 점수 부여
               newPhase = 'complete';
               let score = 0;
+              let reason = '';
+
+              // 기본 점수 (시간 기반)
               if (elapsedTime >= 120) score = 4;
               else if (elapsedTime >= 30) score = 2;
               else if (elapsedTime >= 10) score = 1;
               else score = 0;
-              autoScore = { score, reason: `${Math.floor(elapsedTime)}초간 앉아 있음` };
-              assessmentReport = { score, duration: elapsedTime, stability: 'interrupted' };
+
+              // 안정성 감점 적용
+              if (stabilityScore < 50) {
+                score = Math.max(0, score - 2);
+                reason = `${Math.floor(elapsedTime)}초 앉음, 자세 불안정 (안정성 ${stabilityScore}%)`;
+              } else if (stabilityScore < 80) {
+                score = Math.max(0, score - 1);
+                reason = `${Math.floor(elapsedTime)}초 앉음, 약간 흔들림 (안정성 ${stabilityScore}%)`;
+              } else {
+                reason = `${Math.floor(elapsedTime)}초간 안정적으로 앉아 있음`;
+              }
+
+              autoScore = { score, reason };
+              assessmentReport = {
+                score,
+                duration: elapsedTime,
+                stability: stabilityScore < 50 ? 'poor' : stabilityScore < 80 ? 'fair' : 'good',
+                stabilityScore,
+                lateralShiftCount,
+                maxTrunkTilt,
+                avgTilt: trunkTiltHistory.length > 0 ? (trunkTiltHistory.reduce((a, b) => a + b, 0) / trunkTiltHistory.length).toFixed(1) : 0
+              };
               showResultModal = true;
-              status = `${Math.floor(elapsedTime)}초에서 중단`;
-            } else {
-              const remaining = Math.ceil(targetDuration - elapsedTime);
-              message = `남은 시간: ${Math.floor(remaining / 60)}분 ${remaining % 60}초`;
+              status = `${Math.floor(elapsedTime)}초에서 중단 (안정성: ${stabilityScore}%)`;
             }
 
             // 2분 완료 조건
             if (elapsedTime >= targetDuration) {
               newPhase = 'complete';
-              autoScore = { score: 4, reason: '2분간 안전하게 앉아 있음 - 정상' };
-              assessmentReport = { score: 4, duration: elapsedTime, stability: 'good' };
+              let score = 4;
+              let reason = '';
+
+              // 안정성 감점 적용
+              if (stabilityScore < 50) {
+                score = 2;
+                reason = '2분 완료, 자세 많이 흔들림';
+              } else if (stabilityScore < 80) {
+                score = 3;
+                reason = '2분 완료, 약간의 자세 흔들림';
+              } else {
+                score = 4;
+                reason = '2분간 안정적으로 앉아 있음 - 정상';
+              }
+
+              autoScore = { score, reason };
+              assessmentReport = {
+                score,
+                duration: elapsedTime,
+                stability: stabilityScore < 50 ? 'poor' : stabilityScore < 80 ? 'fair' : 'good',
+                stabilityScore,
+                lateralShiftCount,
+                maxTrunkTilt,
+                avgTilt: trunkTiltHistory.length > 0 ? (trunkTiltHistory.reduce((a, b) => a + b, 0) / trunkTiltHistory.length).toFixed(1) : 0
+              };
               showResultModal = true;
-              status = '✓ 2분 완료!';
+              status = `✓ 2분 완료! (안정성: ${stabilityScore}%)`;
             }
           }
           break;
 
-        // 항목 4: 선 자세에서 앉기
+        // 항목 4: 선 자세에서 앉기 (털썩 vs 천천히 AI 감지)
+        // 핵심: 서있음 감지 → 앉기 동작 분석
         case 'stand_to_sit':
-          if (prev.testPhase === 'waiting') {
-            if (isStanding) {
-              newPhase = 'detecting';
-              status = '서 있음 확인';
-              message = '천천히 앉으세요 (손 사용하지 않고)';
-              startTime = now;
-            } else if (isSitting) {
-              status = '먼저 일어서세요';
-              message = '서 있는 상태에서 시작합니다';
-            }
-          } else if (prev.testPhase === 'detecting') {
-            if (isSitting) {
-              const transitionTime = (now - startTime) / 1000;
-              newPhase = 'complete';
-              // 3초 이상 걸렸으면 조절된 앉기로 판단
-              const score = transitionTime < 3 ? 4 : transitionTime < 5 ? 3 : 2;
-              autoScore = { score, reason: `${transitionTime.toFixed(1)}초에 앉기 완료` };
-              assessmentReport = { score, duration: transitionTime, controlled: transitionTime > 2 };
-              showResultModal = true;
-              status = '✓ 앉기 완료!';
-              confidence = 100;
-            } else if (!isStanding && !isSitting) {
-              status = '앉는 중...';
-              message = '천천히 조절하며 앉으세요';
-              confidence = 50;
+          {
+            // AI 분석 함수 호출
+            const item4Analysis = handleItem4Analysis(landmarks);
+
+            if (prev.testPhase === 'waiting') {
+              // 서있음 감지 대기
+              if (item4Analysis.isStanding) {
+                // 서있음 감지! 앉기 분석 시작
+                newPhase = 'detecting';
+                status = '✓ 서있음 감지!';
+                message = '천천히 앉으세요 (앉기 동작 분석 시작)';
+                startTime = now;
+                // 분석 초기화
+                resetSittingAnalysis();
+                sittingAnalysisRef.current.phase = 'standing';
+                sittingAnalysisRef.current.standingTime = now;
+                sittingAnalysisRef.current.hipPositions = [];
+                sittingAnalysisRef.current.descentVelocities = [];
+                sittingAnalysisRef.current.maxVelocity = 0;
+                sittingAnalysisRef.current.usedHands = false;
+                console.log('[Item4] 서있음 감지 - 앉기 분석 준비 완료');
+              } else {
+                // 아직 서있지 않음
+                status = '서있음 대기 중...';
+                message = `일어서세요 (무릎: ${item4Analysis.kneeAngle?.toFixed(0) || 0}°)`;
+              }
+            } else if (prev.testPhase === 'detecting') {
+              // 앉기 동작 분석 중
+              if (item4Analysis.phase === 'seated' && item4Analysis.score !== null) {
+                // 앉기 완료!
+                newPhase = 'complete';
+
+                // AI 분석 결과 기반 점수
+                let aiScore = item4Analysis.score;
+                let reason = '';
+
+                if (!item4Analysis.isControlled) {
+                  // 털썩 앉음
+                  aiScore = 1;
+                  reason = `⚠️ 조절되지 않고 털썩 앉음 (${item4Analysis.descentDuration.toFixed(1)}초, 최대속도:${item4Analysis.maxVelocity.toFixed(1)})`;
+                } else if (item4Analysis.usedHands) {
+                  // 손 사용
+                  aiScore = 3;
+                  reason = `손을 사용하여 조절하며 앉음 (${item4Analysis.descentDuration.toFixed(1)}초)`;
+                } else {
+                  // 완벽한 앉기
+                  aiScore = 4;
+                  reason = `✓ 손 사용 없이 안전하게 앉음 (${item4Analysis.descentDuration.toFixed(1)}초)`;
+                }
+
+                autoScore = { score: aiScore, reason };
+                assessmentReport = {
+                  score: aiScore,
+                  duration: item4Analysis.descentDuration,
+                  controlled: item4Analysis.isControlled,
+                  usedHands: item4Analysis.usedHands,
+                  maxVelocity: item4Analysis.maxVelocity,
+                  finalVelocity: item4Analysis.finalVelocity
+                };
+                showResultModal = true;
+                status = item4Analysis.isControlled ? '✓ 앉기 완료!' : '⚠️ 털썩 앉음 감지';
+                message = reason;
+                confidence = 100;
+
+                // 상태 업데이트
+                setSittingState(prevState => ({
+                  ...prevState,
+                  phase: 'seated',
+                  kneeAngle: item4Analysis.kneeAngle,
+                  isControlled: item4Analysis.isControlled,
+                  usedHands: item4Analysis.usedHands,
+                  descentDuration: item4Analysis.descentDuration,
+                  maxVelocity: item4Analysis.maxVelocity,
+                  finalVelocity: item4Analysis.finalVelocity,
+                  feedback: { message: reason, type: item4Analysis.isControlled ? 'success' : 'warning' },
+                  autoScore: { score: aiScore, reason },
+                  showResultModal: true
+                }));
+              } else if (item4Analysis.phase === 'descending' || item4Analysis.isDescending) {
+                // 앉는 중 - 실시간 속도 표시
+                status = '앉는 중...';
+                const velocityInfo = item4Analysis.maxVelocity > 0
+                  ? ` (속도: ${item4Analysis.maxVelocity.toFixed(1)})`
+                  : '';
+                message = `천천히 조절하며 앉으세요${velocityInfo}`;
+                confidence = 50;
+
+                // 손 사용 피드백
+                if (item4Analysis.usedHands) {
+                  status = '앉는 중 (손 사용 감지)';
+                  message = `손 사용 감지됨${velocityInfo}`;
+                }
+
+                // 실시간 상태 업데이트
+                setSittingState(prevState => ({
+                  ...prevState,
+                  phase: 'descending',
+                  kneeAngle: item4Analysis.kneeAngle,
+                  usedHands: item4Analysis.usedHands,
+                  maxVelocity: item4Analysis.maxVelocity,
+                  feedback: { message, type: item4Analysis.usedHands ? 'warning' : 'info' }
+                }));
+              } else if (item4Analysis.isStanding) {
+                status = '서 있음 - 앉기 시작하세요';
+                message = '팔짱을 끼고 천천히 앉으세요';
+              }
             }
           }
           break;
@@ -870,28 +2564,88 @@ function BBSTestPage() {
           }
           break;
 
-        // 항목 8: 팔 뻗어 앞으로 내밀기
+        // 항목 8: 팔 뻗어 앞으로 내밀기 (거리 측정 cm)
         case 'arm_reach':
-          if (prev.testPhase === 'waiting') {
-            if (isStanding) {
-              newPhase = 'detecting';
-              status = '팔을 앞으로 뻗으세요';
-              message = '손가락 끝을 최대한 앞으로 내미세요';
-              startTime = now;
-            }
-          } else if (prev.testPhase === 'detecting') {
-            confidence = Math.min(100, armExtension * 300);
-            if (armExtension > 0.2) {
-              status = '팔 뻗기 감지!';
-              if (now - startTime > 2000) {
-                newPhase = 'complete';
-                const score = armExtension > 0.35 ? 4 : armExtension > 0.25 ? 3 : 2;
-                autoScore = { score, reason: '팔 뻗기 완료' };
-                assessmentReport = { score, reach: armExtension };
-                showResultModal = true;
+          {
+            // AI 분석 함수 호출 (캔버스 크기 전달)
+            const item8Analysis = handleItem8Analysis(landmarks, 640, 480);
+
+            if (prev.testPhase === 'waiting') {
+              if (item8Analysis.isStanding) {
+                newPhase = 'detecting';
+                status = '✓ 서있음 감지';
+                message = '팔을 최대한 앞으로 뻗으세요';
+                startTime = now;
+                // 분석 초기화
+                resetArmReachAnalysis();
+                armReachRef.current.phase = 'standing';
+              } else {
+                status = '서있음 대기 중...';
+                message = '서서 팔을 뻗을 준비를 하세요';
               }
-            } else {
-              status = '팔을 더 뻗으세요';
+            } else if (prev.testPhase === 'detecting') {
+              const maxReach = item8Analysis.maxReachCm || 0;
+              const currentReach = item8Analysis.currentReachCm || 0;
+
+              // 신뢰도 계산 (최대 도달 거리 기준)
+              confidence = Math.min(100, (maxReach / 25) * 100);
+
+              if (item8Analysis.isArmExtended && currentReach > 3) {
+                // 팔 뻗기 감지
+                status = `팔 뻗기: ${currentReach.toFixed(1)}cm`;
+                message = `최대: ${maxReach.toFixed(1)}cm`;
+
+                // 점수 표시
+                let scoreText = '';
+                if (maxReach >= 25) scoreText = ' (4점)';
+                else if (maxReach >= 12.5) scoreText = ' (3점)';
+                else if (maxReach >= 5) scoreText = ' (2점)';
+                status += scoreText;
+
+                // 3초 이상 유지하면 완료
+                if (now - startTime > 3000 && maxReach > 5) {
+                  newPhase = 'complete';
+
+                  // 점수 계산
+                  let finalScore = 0;
+                  let reason = '';
+                  if (maxReach >= 25) {
+                    finalScore = 4;
+                    reason = `✓ 훌륭함! ${maxReach.toFixed(1)}cm 도달 (25cm 이상)`;
+                  } else if (maxReach >= 12.5) {
+                    finalScore = 3;
+                    reason = `좋음: ${maxReach.toFixed(1)}cm 도달 (12.5cm 이상)`;
+                  } else if (maxReach >= 5) {
+                    finalScore = 2;
+                    reason = `${maxReach.toFixed(1)}cm 도달 (5cm 이상)`;
+                  } else {
+                    finalScore = 1;
+                    reason = `${maxReach.toFixed(1)}cm - 감독 필요`;
+                  }
+
+                  autoScore = { score: finalScore, reason };
+                  assessmentReport = {
+                    score: finalScore,
+                    reachDistance: maxReach,
+                    unit: 'cm'
+                  };
+                  showResultModal = true;
+                  status = `✓ 팔 뻗기 완료: ${maxReach.toFixed(1)}cm`;
+
+                  // 상태 업데이트
+                  setArmReachState(prevState => ({
+                    ...prevState,
+                    phase: 'complete',
+                    maxReach: maxReach,
+                    feedback: { message: reason, type: finalScore >= 3 ? 'success' : 'warning' },
+                    autoScore: { score: finalScore, reason },
+                    showResultModal: true
+                  }));
+                }
+              } else {
+                status = '팔을 앞으로 뻗으세요';
+                message = `현재: ${currentReach.toFixed(1)}cm / 최대: ${maxReach.toFixed(1)}cm`;
+              }
             }
           }
           break;
@@ -1105,10 +2859,17 @@ function BBSTestPage() {
         postureStability,
         autoScore,
         assessmentReport,
-        showResultModal
+        showResultModal,
+        // 항목 3 자세 추적
+        postureAligned,
+        trunkTiltHistory,
+        lateralShiftCount,
+        maxTrunkTilt,
+        stabilityScore,
+        initialTrunkAngle
       };
     });
-  }, [currentBBSItem]);
+  }, [currentBBSItem, handleItem4Analysis, resetSittingAnalysis, handleItem8Analysis, resetArmReachAnalysis]);
 
   // MediaPipe 초기화
   const initPose = useCallback(async () => {
@@ -1180,7 +2941,8 @@ function BBSTestPage() {
             // 각도 정보 그리기
             drawAngleInfo(ctx, analysis, results.poseLandmarks, canvas.width, canvas.height);
           } else if (isItem2) {
-            const analysis = handleItem2Analysis(results.poseLandmarks);
+            // 실시간 카메라는 측면 뷰로 자세 감지 수행
+            const analysis = handleItem2Analysis(results.poseLandmarks, 'side');
             // 안정성에 따른 색상 - 문자열 비교 (null 체크 추가)
             if (analysis && analysis.stability) {
               skeletonColor = analysis.stability === 'excellent' ? '#10B981' :
@@ -1192,8 +2954,14 @@ function BBSTestPage() {
             drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height);
           } else {
             handleGeneralAnalysis(results.poseLandmarks);
-            // 일반 항목 각도 표시
-            drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height);
+            // 일반 항목 각도 표시 (항목 3에서는 자세 정렬도 표시)
+            drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height, currentItem === 2);
+
+            // 항목 9: 바닥 물건 집기 분석 및 오버레이
+            if (isItem9) {
+              const pickUpData = handleItem9Analysis(results.poseLandmarks, canvas.width, canvas.height);
+              drawItem9Overlay(ctx, results.poseLandmarks, canvas.width, canvas.height, pickUpData);
+            }
           }
 
           // 스켈레톤 그리기
@@ -1444,6 +3212,13 @@ function BBSTestPage() {
       if (results.poseLandmarks) {
         setLandmarks(results.poseLandmarks);
 
+        // 합성 뷰용 랜드마크 저장
+        if (viewType === 'side') {
+          sideLandmarksRef.current = results.poseLandmarks;
+        } else {
+          frontLandmarksRef.current = results.poseLandmarks;
+        }
+
         // AI 자동 감지: 이 영상이 측면인지 정면인지 판단
         const detectedView = detectViewType(results.poseLandmarks);
         const videoKey = viewType === 'side' ? 'video1' : 'video2';
@@ -1491,7 +3266,8 @@ function BBSTestPage() {
                          analysis.state === PostureState.STANDING ? '#10B981' : '#64748B';
           drawAngleInfo(ctx, analysis, results.poseLandmarks, canvas.width, canvas.height);
         } else if (isItem2) {
-          const analysis = handleItem2Analysis(results.poseLandmarks);
+          // 측면 영상: 자세 감지 (앉음/서있음), 정면 영상: 안정성 분석
+          const analysis = handleItem2Analysis(results.poseLandmarks, isSideView ? 'side' : 'front');
           if (analysis && analysis.stability) {
             skeletonColor = analysis.stability === 'excellent' ? '#10B981' :
                            analysis.stability === 'good' ? '#22C55E' :
@@ -1501,6 +3277,12 @@ function BBSTestPage() {
         } else {
           handleGeneralAnalysis(results.poseLandmarks);
           skeletonColor = isSideView ? '#10B981' : '#8B5CF6';
+
+          // 항목 9: 바닥 물건 집기 분석 및 오버레이
+          if (isItem9 && isSideView) {
+            const pickUpData = handleItem9Analysis(results.poseLandmarks, canvas.width, canvas.height);
+            drawItem9Overlay(ctx, results.poseLandmarks, canvas.width, canvas.height, pickUpData);
+          }
         }
 
         // 감지된 타입 표시
@@ -1518,8 +3300,8 @@ function BBSTestPage() {
           radius: 5
         });
 
-        // 신체 각도 표시 (무릎, 발목, 엉덩이)
-        drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height);
+        // 신체 각도 표시 (항목 3에서는 자세 정렬도 표시)
+        drawBodyAngles(ctx, results.poseLandmarks, canvas.width, canvas.height, currentItem === 2);
       }
 
       ctx.restore();
@@ -1791,6 +3573,7 @@ function BBSTestPage() {
     if (isItem2) {
       // 2번 항목 상태 초기화
       resetStandingAnalysis();
+      resetMovementHistory();
 
       // 음성 관련 초기화
       lastSpokenPhaseRef.current = null;
@@ -1815,6 +3598,8 @@ function BBSTestPage() {
         supportSeekingCount: 0,
         unstableTime: 0,
         lostBalance: false,
+        standingAttemptCount: 0,
+        wasStanding: false,
         feedback: { message: '의자에 앉아주세요...', type: 'info' },
         autoScore: null,
         assessmentReport: null,
@@ -1838,8 +3623,8 @@ function BBSTestPage() {
           initialStatus = '앉은 자세 대기';
           break;
         case 'stand_to_sit':
-          initialMessage = '서 있는 상태에서 시작합니다';
-          initialStatus = '선 자세 대기';
+          initialMessage = '서있는 자세가 감지되면 앉기 분석이 시작됩니다';
+          initialStatus = '서있음 대기';
           break;
         case 'transfer':
           initialMessage = '의자에 앉아주세요 (이동 준비)';
@@ -1900,7 +3685,14 @@ function BBSTestPage() {
         postureStability: 'unknown',
         autoScore: null,
         assessmentReport: null,
-        showResultModal: false
+        showResultModal: false,
+        // 항목 3 자세 추적 초기화
+        postureAligned: false,
+        trunkTiltHistory: [],
+        lateralShiftCount: 0,
+        maxTrunkTilt: 0,
+        stabilityScore: 100,
+        initialTrunkAngle: null
       });
     }
 
@@ -1983,7 +3775,14 @@ function BBSTestPage() {
       confidence: 0,
       elapsedTime: 0,
       actionCount: 0,
-      actionDetected: false
+      actionDetected: false,
+      // 항목 3 자세 추적 초기화
+      postureAligned: false,
+      trunkTiltHistory: [],
+      lateralShiftCount: 0,
+      maxTrunkTilt: 0,
+      stabilityScore: 100,
+      initialTrunkAngle: null
     }));
 
     if (currentItem < 13) {
@@ -2105,9 +3904,13 @@ function BBSTestPage() {
     setItemTimer(0);
     setCurrentLandmarks(null);
 
-    // 항목 1, 2 상태 초기화
+    // 항목 1, 2, 4 상태 초기화
     resetStateHistory();
     resetStandingAnalysis();
+    resetMovementHistory();
+    resetSittingAnalysis();
+    resetArmReachAnalysis();
+    resetPickUpAnalysis();
 
     setSitToStandState({
       testPhase: 'waiting',
@@ -2141,6 +3944,8 @@ function BBSTestPage() {
       supportSeekingCount: 0,
       unstableTime: 0,
       lostBalance: false,
+      standingAttemptCount: 0,
+      wasStanding: false,
       feedback: { message: '지지물 없이 서 주세요...', type: 'info' },
       autoScore: null,
       assessmentReport: null,
@@ -2176,9 +3981,13 @@ function BBSTestPage() {
     setItemTimer(0);
     setCurrentLandmarks(null);
 
-    // 항목 1, 2 상태 초기화
+    // 항목 1, 2, 4 상태 초기화
     resetStateHistory();
     resetStandingAnalysis();
+    resetMovementHistory();
+    resetSittingAnalysis();
+    resetArmReachAnalysis();
+    resetPickUpAnalysis();
 
     setSitToStandState({
       testPhase: 'waiting',
@@ -2212,6 +4021,8 @@ function BBSTestPage() {
       supportSeekingCount: 0,
       unstableTime: 0,
       lostBalance: false,
+      standingAttemptCount: 0,
+      wasStanding: false,
       feedback: { message: '지지물 없이 서 주세요...', type: 'info' },
       autoScore: null,
       assessmentReport: null,
@@ -2406,77 +4217,7 @@ function BBSTestPage() {
     }
   }, []);
 
-  // 일반 항목 자동 점수 적용 (2.5초 후 자동 진행)
-  useEffect(() => {
-    if (!generalDetection.showResultModal || !generalDetection.autoScore) return;
-    if (isItem1 || isItem2) return;
-
-    console.log('[AutoProgress] 일반 항목 자동 진행 타이머 시작', generalDetection.autoScore);
-
-    const timer = setTimeout(() => {
-      console.log('[AutoProgress] 일반 항목 자동 진행 실행');
-      if (handleScoreRef.current) {
-        handleScoreRef.current(generalDetection.autoScore.score, {
-          method: 'AI 자동 분석',
-          confidence: Math.min(100, generalDetection.confidence + 15),
-          score: generalDetection.autoScore.score,
-          description: generalDetection.autoScore.reason,
-          reason: generalDetection.autoScore.reason,
-          details: {
-            postureStability: generalDetection.postureStability || '분석 완료',
-            movementQuality: generalDetection.autoScore.score >= 3 ? '양호' : '개선 필요',
-            duration: generalDetection.assessmentReport?.duration,
-            actionCount: generalDetection.assessmentReport?.count
-          },
-          ...generalDetection.assessmentReport
-        });
-      }
-    }, 2500);
-
-    return () => {
-      console.log('[AutoProgress] 일반 항목 타이머 클리어');
-      clearTimeout(timer);
-    };
-  }, [generalDetection.showResultModal, generalDetection.autoScore?.score, isItem1, isItem2]);
-
-  // 항목 1 자동 점수 적용 (2.5초 후 자동 진행)
-  useEffect(() => {
-    if (!isItem1 || !sitToStandState.showResultModal || !sitToStandState.autoScore) return;
-
-    console.log('[AutoProgress] 항목 1 자동 진행 타이머 시작');
-
-    const timer = setTimeout(() => {
-      console.log('[AutoProgress] 항목 1 자동 진행 실행');
-      if (handleScoreRef.current) {
-        handleScoreRef.current(sitToStandState.autoScore.score, {
-          method: 'AI 자동 분석',
-          ...sitToStandState.assessmentReport,
-          usedHands: sitToStandState.usedHandsDuringTransition
-        });
-      }
-    }, 2500);
-
-    return () => clearTimeout(timer);
-  }, [isItem1, sitToStandState.showResultModal, sitToStandState.autoScore?.score]);
-
-  // 항목 2 자동 점수 적용 (2.5초 후 자동 진행)
-  useEffect(() => {
-    if (!isItem2 || !standingState.showResultModal || !standingState.autoScore) return;
-
-    console.log('[AutoProgress] 항목 2 자동 진행 타이머 시작');
-
-    const timer = setTimeout(() => {
-      console.log('[AutoProgress] 항목 2 자동 진행 실행');
-      if (handleScoreRef.current) {
-        handleScoreRef.current(standingState.autoScore.score, {
-          method: 'AI 자동 분석',
-          ...standingState.assessmentReport
-        });
-      }
-    }, 2500);
-
-    return () => clearTimeout(timer);
-  }, [isItem2, standingState.showResultModal, standingState.autoScore?.score]);
+  // 자동 진행 제거됨 - 수동으로 '다음 항목' 버튼 클릭 필요
 
   // Setup 화면
   if (showSetup) {
@@ -2791,6 +4532,27 @@ function BBSTestPage() {
     setTimeout(() => printWindow.print(), 500);
   };
 
+  // PRD 문서 다운로드
+  const downloadPRD = async () => {
+    try {
+      const response = await fetch('/BBS_PRD.md');
+      const content = await response.text();
+
+      const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'BBS_PRD.md';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('PRD 다운로드 실패:', error);
+      alert('PRD 파일 다운로드에 실패했습니다.');
+    }
+  };
+
   // 완료 화면 - 상세 문진표
   if (isComplete) {
     const risk = getRiskLevel();
@@ -2958,10 +4720,15 @@ function BBSTestPage() {
             </Card>
 
             {/* 버튼 */}
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 gap-3">
               <Button variant="secondary" onClick={() => navigateTo(PAGES.HOME)}>
                 홈으로
               </Button>
+              <Button variant="bbs" onClick={resetTest}>
+                다시 검사
+              </Button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               <Button
                 variant="bbs"
                 onClick={downloadPDF}
@@ -2972,8 +4739,15 @@ function BBSTestPage() {
                 </svg>
                 PDF 저장
               </Button>
-              <Button variant="bbs" onClick={resetTest}>
-                다시 검사
+              <Button
+                variant="secondary"
+                onClick={downloadPRD}
+                className="flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                PRD 문서
               </Button>
             </div>
 
@@ -3005,26 +4779,6 @@ function BBSTestPage() {
 
         <main className="max-w-4xl mx-auto px-4 py-8">
           <div className="space-y-4">
-            {/* AI 감지 결과 패널 */}
-            <div className="bg-gradient-to-r from-blue-900/50 to-purple-900/50 border border-blue-500/50 rounded-lg p-3 text-sm">
-              <div className="text-blue-400 font-bold mb-2">🤖 AI 자동 감지 결과</div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-slate-800/50 rounded-lg p-2">
-                  <div className="text-slate-400 text-xs mb-1">영상 1 (왼쪽)</div>
-                  <div className={`font-bold ${video1DetectedType === 'side' ? 'text-green-400' : video1DetectedType === 'front' ? 'text-purple-400' : 'text-yellow-400'}`}>
-                    {video1DetectedType === 'side' ? '📐 측면 (분석용)' : video1DetectedType === 'front' ? '👤 정면 (보조)' : '⏳ 감지 중...'}
-                  </div>
-                </div>
-                <div className="bg-slate-800/50 rounded-lg p-2">
-                  <div className="text-slate-400 text-xs mb-1">영상 2 (오른쪽)</div>
-                  <div className={`font-bold ${video2DetectedType === 'side' ? 'text-green-400' : video2DetectedType === 'front' ? 'text-purple-400' : 'text-yellow-400'}`}>
-                    {video2DetectedType === 'side' ? '📐 측면 (분석용)' : video2DetectedType === 'front' ? '👤 정면 (보조)' : '⏳ 감지 중...'}
-                  </div>
-                </div>
-              </div>
-              <div className="text-slate-500 text-xs mt-2">* 어깨/엉덩이 좌우 거리로 자동 판별</div>
-            </div>
-
             {/* 진행률 */}
             <ProgressBar progress={(1 / 14) * 100} color="blue" height="md" />
 
@@ -3074,63 +4828,43 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">📐 측면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video
-                    ref={sideVideoRef}
-                    className="absolute inset-0 w-full h-full object-contain"
-                    playsInline
-                    muted
-                    controls
-                    onLoadedData={() => console.log('[Item1-Side] loadeddata')}
-                    onPlay={() => console.log('[Item1-Side] playing')}
-                    onError={(e) => console.error('[Item1-Side] error:', e)}
-                  />
-                  <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
-                  {/* 상태 표시 */}
-                  {sideVideoUrl && cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
-                      측면 로딩...
-                    </div>
-                  )}
-                  {sideVideoUrl && isAnalyzing && !cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
-                      {isSideVideoPaused ? '일시정지' : '분석 중'}
-                    </div>
-                  )}
-                  {!sideVideoUrl && (
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <span className="text-slate-500 text-sm">영상 없음</span>
-                    </div>
+                  {sideVideoUrl ? (
+                    <>
+                      <video
+                        ref={sideVideoRef}
+                        src={sideVideoUrl}
+                        className="absolute inset-0 w-full h-full object-contain"
+                        playsInline
+                        muted
+                        controls
+                      />
+                      <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
+                      {cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">로딩...</div>
+                      )}
+                      {isAnalyzing && !cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                          {isSideVideoPaused ? '일시정지' : '분석 중'}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors">
+                      <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                      <span className="text-slate-400 text-sm">측면 영상 업로드</span>
+                      <input type="file" accept="video/*" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) setSideVideoUrl(URL.createObjectURL(file)); }} />
+                    </label>
                   )}
                 </div>
-                {/* 측면 영상 컨트롤 */}
-                {isAnalyzing && !cameraLoading && sideVideoUrl && (
+                {isAnalyzing && sideVideoUrl && (
                   <div className="bg-slate-800/80 rounded-lg p-2">
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={toggleSideVideoPause}
-                        className="w-8 h-8 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors flex-shrink-0"
-                      >
-                        {isSideVideoPaused ? (
-                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M8 5v14l11-7z" />
-                          </svg>
-                        ) : (
-                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                          </svg>
-                        )}
+                      <button onClick={toggleSideVideoPause} className="w-8 h-8 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center">
+                        {isSideVideoPaused ? <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg> : <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" /></svg>}
                       </button>
-                      <input
-                        type="range"
-                        min="0"
-                        max={sideVideoDuration || 100}
-                        value={sideVideoProgress}
-                        onChange={(e) => seekSideVideo(parseFloat(e.target.value))}
-                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                      />
-                    </div>
-                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
-                      {Math.floor(sideVideoProgress / 60)}:{String(Math.floor(sideVideoProgress % 60)).padStart(2, '0')} / {Math.floor(sideVideoDuration / 60)}:{String(Math.floor(sideVideoDuration % 60)).padStart(2, '0')}
+                      <input type="range" min="0" max={sideVideoDuration || 100} value={sideVideoProgress} onChange={(e) => seekSideVideo(parseFloat(e.target.value))} className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500" />
                     </div>
                   </div>
                 )}
@@ -3140,62 +4874,43 @@ function BBSTestPage() {
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
-                  <video
-                    ref={frontVideoRef}
-                    className="absolute inset-0 w-full h-full object-contain"
-                    playsInline
-                    muted
-                    controls
-                    onLoadedData={() => console.log('[Front] loadeddata')}
-                    onPlay={() => console.log('[Front] playing')}
-                  />
-                  <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
-                  {!frontVideoUrl && (
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <span className="text-slate-500 text-sm">영상 없음</span>
-                    </div>
-                  )}
-                  {/* 상태 표시 */}
-                  {frontVideoUrl && cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
-                      정면 로딩...
-                    </div>
-                  )}
-                  {frontVideoUrl && isAnalyzing && !cameraLoading && (
-                    <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
-                      {isFrontVideoPaused ? '일시정지' : '분석 중'}
-                    </div>
+                  {frontVideoUrl ? (
+                    <>
+                      <video
+                        ref={frontVideoRef}
+                        src={frontVideoUrl}
+                        className="absolute inset-0 w-full h-full object-contain"
+                        playsInline
+                        muted
+                        controls
+                      />
+                      <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
+                      {cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">로딩...</div>
+                      )}
+                      {isAnalyzing && !cameraLoading && (
+                        <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
+                          {isFrontVideoPaused ? '일시정지' : '분석 중'}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors">
+                      <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                      <span className="text-slate-400 text-sm">정면 영상 업로드</span>
+                      <input type="file" accept="video/*" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) setFrontVideoUrl(URL.createObjectURL(file)); }} />
+                    </label>
                   )}
                 </div>
-                {/* 정면 영상 컨트롤 */}
-                {isAnalyzing && !cameraLoading && frontVideoUrl && (
+                {isAnalyzing && frontVideoUrl && (
                   <div className="bg-slate-800/80 rounded-lg p-2">
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={toggleFrontVideoPause}
-                        className="w-8 h-8 rounded-full bg-purple-500 hover:bg-purple-600 flex items-center justify-center transition-colors flex-shrink-0"
-                      >
-                        {isFrontVideoPaused ? (
-                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M8 5v14l11-7z" />
-                          </svg>
-                        ) : (
-                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                          </svg>
-                        )}
+                      <button onClick={toggleFrontVideoPause} className="w-8 h-8 rounded-full bg-purple-500 hover:bg-purple-600 flex items-center justify-center">
+                        {isFrontVideoPaused ? <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg> : <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" /></svg>}
                       </button>
-                      <input
-                        type="range"
-                        min="0"
-                        max={frontVideoDuration || 100}
-                        value={frontVideoProgress}
-                        onChange={(e) => seekFrontVideo(parseFloat(e.target.value))}
-                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
-                      />
-                    </div>
-                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
-                      {Math.floor(frontVideoProgress / 60)}:{String(Math.floor(frontVideoProgress % 60)).padStart(2, '0')} / {Math.floor(frontVideoDuration / 60)}:{String(Math.floor(frontVideoDuration % 60)).padStart(2, '0')}
+                      <input type="range" min="0" max={frontVideoDuration || 100} value={frontVideoProgress} onChange={(e) => seekFrontVideo(parseFloat(e.target.value))} className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500" />
                     </div>
                   </div>
                 )}
@@ -3219,7 +4934,7 @@ function BBSTestPage() {
               </div>
             )}
 
-            {/* 분석 상태 표시 */}
+            {/* 분석 상태 표시 - Item 1 */}
             {isAnalyzing && !cameraLoading && (
               <div className="mt-3 space-y-2">
                 {/* 자세 상태 */}
@@ -3236,17 +4951,20 @@ function BBSTestPage() {
                     </p>
                   </div>
 
-                  {/* 손 상태 */}
+                  {/* 손 상태 - 개선된 표시 */}
                   <div className={`flex-1 px-3 py-2 rounded-lg text-center ${
                     sitToStandState.handSupport === HandSupportState.HEAVY_SUPPORT ? 'bg-red-500 animate-pulse' :
+                    sitToStandState.handSupport === HandSupportState.LIGHT_SUPPORT ? 'bg-yellow-500' :
                     sitToStandState.handPosition === HandPosition.HANDS_UP ? 'bg-emerald-500/80' :
+                    sitToStandState.handPosition === HandPosition.HANDS_ON_KNEE ? 'bg-orange-500/80' :
                     'bg-slate-700/80'
                   }`}>
                     <p className="text-white font-medium text-sm">
-                      {sitToStandState.handSupport === HandSupportState.HEAVY_SUPPORT && '⚠️ 손 사용!'}
-                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_UP && '✓ 손 OK'}
-                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_ON_KNEE && '손 무릎 위'}
-                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handPosition === HandPosition.UNKNOWN && '손 감지 중'}
+                      {sitToStandState.handSupport === HandSupportState.HEAVY_SUPPORT && '⚠️ 무릎 밀기!'}
+                      {sitToStandState.handSupport === HandSupportState.LIGHT_SUPPORT && '📍 손 무릎 위'}
+                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handSupport !== HandSupportState.LIGHT_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_UP && '✓ 손 내림'}
+                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handSupport !== HandSupportState.LIGHT_SUPPORT && sitToStandState.handPosition === HandPosition.HANDS_ON_KNEE && '📍 무릎 위'}
+                      {sitToStandState.handSupport !== HandSupportState.HEAVY_SUPPORT && sitToStandState.handSupport !== HandSupportState.LIGHT_SUPPORT && sitToStandState.handPosition === HandPosition.UNKNOWN && '👀 손 감지'}
                     </p>
                   </div>
                 </div>
@@ -3473,14 +5191,21 @@ function BBSTestPage() {
                 </div>
               </div>
 
-              {/* 자동 진행 표시 */}
+              {/* 다음 항목 버튼 */}
               <div className="p-6 bg-slate-800/50">
-                <div className="text-center">
-                  <p className="text-slate-400 text-sm mb-3">항목 2로 자동 진행됩니다...</p>
-                  <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
-                    <div className="bg-gradient-to-r from-blue-500 to-emerald-500 h-2 rounded-full animate-pulse" style={{ width: '100%' }} />
-                  </div>
-                </div>
+                <Button
+                  variant="primary"
+                  fullWidth
+                  onClick={() => {
+                    handleScore(sitToStandState.autoScore?.score || 0, {
+                      method: 'AI 자동 분석',
+                      ...sitToStandState.assessmentReport,
+                      usedHands: sitToStandState.usedHandsDuringTransition
+                    });
+                  }}
+                >
+                  다음 항목으로 →
+                </Button>
               </div>
             </div>
           </div>
@@ -3538,9 +5263,9 @@ function BBSTestPage() {
                 <Button
                   variant="secondary"
                   className="flex-1"
-                  onClick={goToNextItem}
+                  onClick={() => handleScore(4, { method: '건너뛰기 (4점 처리)', reason: '사용자가 건너뛰기 선택' })}
                 >
-                  건너뛰기 →
+                  건너뛰기 (4점) →
                 </Button>
               </div>
               <Button
@@ -3627,17 +5352,7 @@ function BBSTestPage() {
               </div>
             </Card>
 
-            {/* 영상 업로드 안내 - Item 2 */}
-            {!sideVideoUrl && !frontVideoUrl && !isAnalyzing && (
-              <Card padding="md" className="bg-blue-500/10 border border-blue-500/30">
-                <div className="text-center">
-                  <p className="text-blue-400 font-medium mb-2">📹 항목 2 검사 영상 업로드</p>
-                  <p className="text-slate-400 text-sm">이 항목의 측면/정면 영상을 업로드해주세요</p>
-                </div>
-              </Card>
-            )}
-
-            {/* 양쪽 동영상 뷰 - Item 2 */}
+            {/* 양쪽 동영상 뷰 (측면 + 정면) - Item 2 */}
             <div className="grid grid-cols-2 gap-3">
               {/* 측면 영상 */}
               <div className="space-y-2">
@@ -3652,34 +5367,10 @@ function BBSTestPage() {
                         playsInline
                         muted
                         controls
-                        onLoadedData={() => console.log('[Item2-Side] loadeddata')}
-                        onPlay={() => console.log('[Item2-Side] playing')}
                       />
                       <canvas ref={sideCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
-                      {/* 재업로드 버튼 */}
-                      {!isAnalyzing && (
-                        <label className="absolute top-2 right-2 bg-slate-900/80 hover:bg-slate-800 text-white text-xs px-2 py-1 rounded cursor-pointer z-20">
-                          변경
-                          <input
-                            type="file"
-                            accept="video/*"
-                            className="hidden"
-                            onChange={(e) => {
-                              const file = e.target.files?.[0];
-                              if (file) {
-                                if (sideVideoUrl) URL.revokeObjectURL(sideVideoUrl);
-                                const url = URL.createObjectURL(file);
-                                setSideVideoUrl(url);
-                              }
-                            }}
-                          />
-                        </label>
-                      )}
-                      {/* 상태 표시 */}
                       {cameraLoading && (
-                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
-                          측면 로딩...
-                        </div>
+                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">로딩...</div>
                       )}
                       {isAnalyzing && !cameraLoading && (
                         <div className="absolute top-2 left-2 bg-green-500/80 text-white text-xs px-2 py-1 rounded z-20">
@@ -3688,61 +5379,28 @@ function BBSTestPage() {
                       )}
                     </>
                   ) : (
-                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors z-10">
+                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors">
                       <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                       </svg>
                       <span className="text-slate-400 text-sm">측면 영상 업로드</span>
-                      <input
-                        type="file"
-                        accept="video/*"
-                        className="hidden"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) {
-                            const url = URL.createObjectURL(file);
-                            setSideVideoUrl(url);
-                          }
-                        }}
-                      />
+                      <input type="file" accept="video/*" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) setSideVideoUrl(URL.createObjectURL(file)); }} />
                     </label>
                   )}
                 </div>
-                {/* 측면 영상 컨트롤 */}
-                {isAnalyzing && !cameraLoading && sideVideoUrl && (
+                {isAnalyzing && sideVideoUrl && (
                   <div className="bg-slate-800/80 rounded-lg p-2">
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={toggleSideVideoPause}
-                        className="w-8 h-8 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center transition-colors flex-shrink-0"
-                      >
-                        {isSideVideoPaused ? (
-                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M8 5v14l11-7z" />
-                          </svg>
-                        ) : (
-                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                          </svg>
-                        )}
+                      <button onClick={toggleSideVideoPause} className="w-8 h-8 rounded-full bg-blue-500 hover:bg-blue-600 flex items-center justify-center">
+                        {isSideVideoPaused ? <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg> : <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" /></svg>}
                       </button>
-                      <input
-                        type="range"
-                        min="0"
-                        max={sideVideoDuration || 100}
-                        value={sideVideoProgress}
-                        onChange={(e) => seekSideVideo(parseFloat(e.target.value))}
-                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                      />
-                    </div>
-                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
-                      {Math.floor(sideVideoProgress / 60)}:{String(Math.floor(sideVideoProgress % 60)).padStart(2, '0')} / {Math.floor(sideVideoDuration / 60)}:{String(Math.floor(sideVideoDuration % 60)).padStart(2, '0')}
+                      <input type="range" min="0" max={sideVideoDuration || 100} value={sideVideoProgress} onChange={(e) => seekSideVideo(parseFloat(e.target.value))} className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500" />
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* 정면 영상 - Item 2 */}
+              {/* 정면 영상 */}
               <div className="space-y-2">
                 <div className="text-center text-slate-300 font-medium text-sm">👤 정면</div>
                 <div className="aspect-[9/16] max-h-[45vh] bg-slate-800 rounded-xl overflow-hidden relative">
@@ -3755,34 +5413,10 @@ function BBSTestPage() {
                         playsInline
                         muted
                         controls
-                        onLoadedData={() => console.log('[Item2-Front] loadeddata')}
-                        onPlay={() => console.log('[Item2-Front] playing')}
                       />
                       <canvas ref={frontCanvasRef} className="absolute inset-0 w-full h-full object-contain z-10 pointer-events-none" style={{ opacity: 0.7 }} />
-                      {/* 재업로드 버튼 */}
-                      {!isAnalyzing && (
-                        <label className="absolute top-2 right-2 bg-slate-900/80 hover:bg-slate-800 text-white text-xs px-2 py-1 rounded cursor-pointer z-20">
-                          변경
-                          <input
-                            type="file"
-                            accept="video/*"
-                            className="hidden"
-                            onChange={(e) => {
-                              const file = e.target.files?.[0];
-                              if (file) {
-                                if (frontVideoUrl) URL.revokeObjectURL(frontVideoUrl);
-                                const url = URL.createObjectURL(file);
-                                setFrontVideoUrl(url);
-                              }
-                            }}
-                          />
-                        </label>
-                      )}
-                      {/* 상태 표시 */}
                       {cameraLoading && (
-                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">
-                          정면 로딩...
-                        </div>
+                        <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs px-2 py-1 rounded z-20">로딩...</div>
                       )}
                       {isAnalyzing && !cameraLoading && (
                         <div className="absolute top-2 left-2 bg-purple-500/80 text-white text-xs px-2 py-1 rounded z-20">
@@ -3791,55 +5425,22 @@ function BBSTestPage() {
                       )}
                     </>
                   ) : (
-                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors z-10">
+                    <label className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-slate-700/50 transition-colors">
                       <svg className="w-12 h-12 text-slate-500 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                       </svg>
                       <span className="text-slate-400 text-sm">정면 영상 업로드</span>
-                      <input
-                        type="file"
-                        accept="video/*"
-                        className="hidden"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) {
-                            const url = URL.createObjectURL(file);
-                            setFrontVideoUrl(url);
-                          }
-                        }}
-                      />
+                      <input type="file" accept="video/*" className="hidden" onChange={(e) => { const file = e.target.files?.[0]; if (file) setFrontVideoUrl(URL.createObjectURL(file)); }} />
                     </label>
                   )}
                 </div>
-                {/* 정면 영상 컨트롤 */}
-                {isAnalyzing && !cameraLoading && frontVideoUrl && (
+                {isAnalyzing && frontVideoUrl && (
                   <div className="bg-slate-800/80 rounded-lg p-2">
                     <div className="flex items-center gap-2">
-                      <button
-                        onClick={toggleFrontVideoPause}
-                        className="w-8 h-8 rounded-full bg-purple-500 hover:bg-purple-600 flex items-center justify-center transition-colors flex-shrink-0"
-                      >
-                        {isFrontVideoPaused ? (
-                          <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M8 5v14l11-7z" />
-                          </svg>
-                        ) : (
-                          <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
-                          </svg>
-                        )}
+                      <button onClick={toggleFrontVideoPause} className="w-8 h-8 rounded-full bg-purple-500 hover:bg-purple-600 flex items-center justify-center">
+                        {isFrontVideoPaused ? <svg className="w-4 h-4 text-white ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg> : <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" /></svg>}
                       </button>
-                      <input
-                        type="range"
-                        min="0"
-                        max={frontVideoDuration || 100}
-                        value={frontVideoProgress}
-                        onChange={(e) => seekFrontVideo(parseFloat(e.target.value))}
-                        className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
-                      />
-                    </div>
-                    <div className="text-slate-400 text-xs font-mono text-center mt-1">
-                      {Math.floor(frontVideoProgress / 60)}:{String(Math.floor(frontVideoProgress % 60)).padStart(2, '0')} / {Math.floor(frontVideoDuration / 60)}:{String(Math.floor(frontVideoDuration % 60)).padStart(2, '0')}
+                      <input type="range" min="0" max={frontVideoDuration || 100} value={frontVideoProgress} onChange={(e) => seekFrontVideo(parseFloat(e.target.value))} className="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500" />
                     </div>
                   </div>
                 )}
@@ -3863,7 +5464,7 @@ function BBSTestPage() {
               </div>
             )}
 
-            {/* 분석 상태 표시 */}
+            {/* 분석 상태 표시 - Item 2 */}
             {isAnalyzing && !cameraLoading && (
               <div className="mt-3 space-y-2">
                 {/* 타이머 & 피드백 */}
@@ -4175,14 +5776,20 @@ function BBSTestPage() {
                 )}
               </div>
 
-              {/* 자동 진행 표시 */}
+              {/* 다음 항목 버튼 */}
               <div className="p-6 bg-slate-800/50">
-                <div className="text-center">
-                  <p className="text-slate-400 text-sm mb-3">항목 3으로 자동 진행됩니다...</p>
-                  <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
-                    <div className="bg-gradient-to-r from-blue-500 to-emerald-500 h-2 rounded-full animate-pulse" style={{ width: '100%' }} />
-                  </div>
-                </div>
+                <Button
+                  variant="primary"
+                  fullWidth
+                  onClick={() => {
+                    handleScore(standingState.autoScore?.score || 0, {
+                      method: 'AI 자동 분석',
+                      ...standingState.assessmentReport
+                    });
+                  }}
+                >
+                  다음 항목으로 →
+                </Button>
               </div>
             </div>
           </div>
@@ -4212,6 +5819,10 @@ function BBSTestPage() {
                       }
                       setIsAnalyzing(false);
                       resetStandingAnalysis();
+                      resetMovementHistory();
+                      resetSittingAnalysis();
+                      resetArmReachAnalysis();
+                      resetPickUpAnalysis();
                       setStandingState({
                         testPhase: 'waiting',
                         currentState: 'not_standing',
@@ -4239,9 +5850,9 @@ function BBSTestPage() {
                 <Button
                   variant="secondary"
                   className="flex-1"
-                  onClick={goToNextItem}
+                  onClick={() => handleScore(4, { method: '건너뛰기 (4점 처리)', reason: '사용자가 건너뛰기 선택' })}
                 >
-                  건너뛰기 →
+                  건너뛰기 (4점) →
                 </Button>
               </div>
               <Button
@@ -4657,14 +6268,30 @@ function BBSTestPage() {
               </div>
             </div>
 
-            {/* 자동 진행 표시 */}
-            <div className="p-6 pt-0 space-y-3">
-              <div className="text-center">
-                <p className="text-slate-400 text-sm mb-3">다음 항목으로 자동 진행됩니다...</p>
-                <div className="w-full bg-slate-700 rounded-full h-2 overflow-hidden">
-                  <div className="bg-gradient-to-r from-blue-500 to-emerald-500 h-2 rounded-full animate-pulse" style={{ width: '100%' }} />
-                </div>
-              </div>
+            {/* 다음 항목 버튼 */}
+            <div className="p-6 pt-0">
+              <Button
+                variant="primary"
+                fullWidth
+                onClick={() => {
+                  handleScore(generalDetection.autoScore.score, {
+                    method: 'AI 자동 분석',
+                    confidence: Math.min(100, generalDetection.confidence + 15),
+                    score: generalDetection.autoScore.score,
+                    description: generalDetection.autoScore.reason,
+                    reason: generalDetection.autoScore.reason,
+                    details: {
+                      postureStability: generalDetection.postureStability || '분석 완료',
+                      movementQuality: generalDetection.autoScore.score >= 3 ? '양호' : '개선 필요',
+                      duration: generalDetection.assessmentReport?.duration,
+                      actionCount: generalDetection.assessmentReport?.count
+                    },
+                    ...generalDetection.assessmentReport
+                  });
+                }}
+              >
+                다음 항목으로 →
+              </Button>
             </div>
           </div>
         </div>
@@ -4704,9 +6331,9 @@ function BBSTestPage() {
               <Button
                 variant="secondary"
                 className="flex-1"
-                onClick={goToNextItem}
+                onClick={() => handleScore(4, { method: '건너뛰기 (4점 처리)', reason: '사용자가 건너뛰기 선택' })}
               >
-                건너뛰기 →
+                건너뛰기 (4점) →
               </Button>
             </div>
             <Button
