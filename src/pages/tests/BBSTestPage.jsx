@@ -25,6 +25,22 @@ import { BBS_ITEMS } from '../../constants';
 import { useNavigation, PAGES } from '../../context/NavigationContext';
 import { useTestHistory } from '../../context/TestHistoryContext';
 import { detectOffsetClient, detectOffsetAudio, applyOffsetToVideos } from '../../utils/videoSync';
+import {
+  analyzeForItem,
+  detectSitting,
+  detectStanding,
+  detectHandSupport,
+  detectArmExtension,
+  detectBodyRotation,
+  detectSingleLegStance,
+  detectFootStep,
+  measureFeetDistance,
+  measureStability,
+  getTrunkTilt,
+  getKneeAngle,
+  getHipAngle,
+  POSE_LANDMARKS
+} from '../../utils/bbsMotionAnalysis';
 
 /**
  * 음성 안내 함수 (비활성화됨)
@@ -215,17 +231,36 @@ function BBSTestPage() {
   const sideVideoUrl = itemVideos[currentItem]?.side;
   const frontVideoUrl = itemVideos[currentItem]?.front;
 
-  // 영상 싱크 상태
-  const [videoSyncInfo, setVideoSyncInfo] = useState({
+  // 영상 싱크 상태 (각 항목별)
+  const defaultSyncInfo = {
     offset: 0,
-    sideTrim: 0,    // 측면 트리밍 시간 (초)
-    frontTrim: 0,   // 정면 트리밍 시간 (초)
+    sideTrim: 0,
+    frontTrim: 0,
     confidence: 0,
-    method: null,   // 'audio' or 'motion'
+    method: null,
     synced: false,
     syncing: false,
     error: null
-  });
+  };
+  const [itemSyncInfos, setItemSyncInfos] = useState(
+    Array(14).fill(null).map(() => ({ ...defaultSyncInfo }))
+  );
+
+  // 현재 항목의 싱크 정보 (편의를 위한 계산된 값)
+  const videoSyncInfo = itemSyncInfos[currentItem] || defaultSyncInfo;
+
+  // 현재 항목 싱크 정보 업데이트 함수
+  const setVideoSyncInfo = (updater) => {
+    setItemSyncInfos(prev => {
+      const newInfos = [...prev];
+      if (typeof updater === 'function') {
+        newInfos[currentItem] = updater(newInfos[currentItem] || defaultSyncInfo);
+      } else {
+        newInfos[currentItem] = updater;
+      }
+      return newInfos;
+    });
+  };
 
   // 현재 항목 영상 설정 함수
   const setCurrentItemVideo = (type, url) => {
@@ -327,6 +362,17 @@ function BBSTestPage() {
   const startTimeRef = useRef(null);
   const sideFileInputRef = useRef(null); // 측면 영상 파일 입력
   const frontFileInputRef = useRef(null); // 정면 영상 파일 입력
+
+  // BBS 모션 분석용 히스토리 refs
+  const landmarksHistoryRef = useRef([]); // 랜드마크 히스토리 (안정성 분석용)
+  const previousLandmarksRef = useRef(null); // 이전 프레임 랜드마크
+  const initialLandmarksRef = useRef(null); // 초기 랜드마크 (회전 분석용)
+  const motionStateRef = useRef({
+    stepCount: 0,
+    lastSteppingFoot: null,
+    cumulativeRotation: 0,
+    lastRotation: 0
+  }); // 모션 분석 상태
 
   // 항목 2: 정면 영상 안정성 분석 결과 저장
   const frontStabilityRef = useRef({
@@ -2140,6 +2186,32 @@ function BBSTestPage() {
 
     const now = Date.now();
 
+    // ===== BBS 모션 분석 유틸리티 사용 =====
+    // 랜드마크 히스토리 업데이트 (안정성 분석용)
+    landmarksHistoryRef.current.push(landmarks);
+    if (landmarksHistoryRef.current.length > 60) {
+      landmarksHistoryRef.current.shift(); // 최근 60프레임만 유지 (약 2초)
+    }
+
+    // 항목별 고급 분석 실행
+    const itemNumber = currentItem + 1; // 1-based index
+    const advancedAnalysis = analyzeForItem(itemNumber, landmarks, {
+      landmarksHistory: landmarksHistoryRef.current,
+      previousLandmarks: previousLandmarksRef.current,
+      initialLandmarks: initialLandmarksRef.current,
+      ...motionStateRef.current
+    });
+
+    // 이전 랜드마크 저장
+    previousLandmarksRef.current = landmarks;
+
+    // 새로운 분석 함수들로 자세 감지
+    const sittingInfo = detectSitting(landmarks);
+    const standingInfo = detectStanding(landmarks);
+    const handSupportInfo = detectHandSupport(landmarks);
+    const stabilityInfo = measureStability(landmarksHistoryRef.current);
+    const trunkTilt = getTrunkTilt(landmarks);
+
     // 주요 랜드마크 추출
     const leftHip = landmarks[23];
     const rightHip = landmarks[24];
@@ -2153,33 +2225,38 @@ function BBSTestPage() {
     const rightWrist = landmarks[16];
     const nose = landmarks[0];
 
-    // 기본 분석
+    // 기본 분석 (기존 호환성 유지)
     const hipY = (leftHip.y + rightHip.y) / 2;
     const kneeY = (leftKnee.y + rightKnee.y) / 2;
     const ankleY = (leftAnkle.y + rightAnkle.y) / 2;
     const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
     const hipToAnkleRatio = (ankleY - hipY) / (ankleY - shoulderY);
-    const isStanding = hipToAnkleRatio > 0.5;
-    const isSitting = hipToAnkleRatio < 0.4;
     const ankleDistance = Math.abs(leftAnkle.x - rightAnkle.x);
 
-    // 발 높이 차이 (한 발 들기 감지)
-    const footHeightDiff = Math.abs(leftAnkle.y - rightAnkle.y);
-    const isOneLegRaised = footHeightDiff > 0.08;
+    // ===== 새로운 BBS 모션 분석 함수 사용 =====
+    // 앉음/서있음 감지 (향상된 정확도)
+    const isStanding = standingInfo.isStanding || hipToAnkleRatio > 0.5;
+    const isSitting = sittingInfo.isSitting || hipToAnkleRatio < 0.4;
+
+    // 발 관련 분석 (발 모음, 한 발 들기)
+    const feetInfo = measureFeetDistance(landmarks);
+    const singleLegInfo = detectSingleLegStance(landmarks);
+    const footHeightDiff = singleLegInfo.ankleYDiff;
+    const isOneLegRaised = singleLegInfo.isSingleLeg;
 
     // 어깨 회전 (뒤돌아보기 감지)
+    const rotationInfo = detectBodyRotation(landmarks, initialLandmarksRef.current);
     const shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
-    const shoulderRotation = shoulderWidth < 0.12; // 좁아지면 회전 중
+    const shoulderRotation = Math.abs(rotationInfo.rotationChange) > 30 || shoulderWidth < 0.12;
 
-    // 상체 기울기 (물건 집기, 팔 뻗기 감지)
+    // 팔 뻗기 감지 (향상된)
+    const armExtensionInfo = detectArmExtension(landmarks);
     const bodyLean = shoulderY - hipY;
     const isBending = bodyLean > 0.15;
+    const armExtension = armExtensionInfo.reachDistance;
 
-    // 팔 뻗기 감지
-    const armExtension = Math.max(
-      Math.abs(leftWrist.z - leftShoulder.z),
-      Math.abs(rightWrist.z - rightShoulder.z)
-    );
+    // 손 지지 감지
+    const isUsingHandSupport = handSupportInfo.isUsingHandSupport;
 
     // ===== 항목 3: 자세 정렬 및 안정성 계산 =====
     // 어깨 중심점
@@ -2527,53 +2604,83 @@ function BBSTestPage() {
           }
           break;
 
-        // 항목 6: 눈 감고 서 있기 (10초)
-        // 항목 7: 두 발 모아 서 있기 (1분)
+        // 항목 6: 눈 감고 서 있기 (10초) - 안정성 분석 강화
+        // 항목 7: 두 발 모아 서 있기 (1분) - 발 간격 분석 강화
         case 'standing_duration':
         case 'standing_feet_together':
-          if (prev.testPhase === 'waiting') {
-            if (isStanding) {
-              newPhase = 'detecting';
-              startTime = now;
-              status = '서 있음 감지 중...';
-            } else {
-              status = '서 주세요';
-              message = detection.type === 'standing_feet_together' ? '두 발을 모으고 서세요' : '서 계세요';
-            }
-          } else if (prev.testPhase === 'detecting') {
-            if (isStanding && now - startTime > 500) {
-              newPhase = 'in_progress';
-              startTime = now;
-              status = '타이머 시작!';
-            } else if (!isStanding) {
-              newPhase = 'waiting';
-              startTime = null;
-            }
-          } else if (prev.testPhase === 'in_progress') {
-            elapsedTime = (now - startTime) / 1000;
-            confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
-            status = `서 있음: ${Math.floor(elapsedTime)}초 / ${targetDuration}초`;
+          {
+            const isItem7 = detection.type === 'standing_feet_together';
 
-            // 발 모으기 체크 (항목 7)
-            if (detection.type === 'standing_feet_together' && ankleDistance > 0.15) {
-              message = '⚠️ 발을 더 모아주세요';
-              postureStability = 'warning';
-            } else {
-              message = `남은 시간: ${Math.ceil(targetDuration - elapsedTime)}초`;
-            }
+            if (prev.testPhase === 'waiting') {
+              if (isStanding) {
+                // 항목 7: 발 모음 상태 확인
+                if (isItem7 && !feetInfo.feetTogether) {
+                  status = '발을 모으세요';
+                  message = `현재 발 간격: ${(feetInfo.ankleDistance * 100).toFixed(0)}%`;
+                } else {
+                  newPhase = 'detecting';
+                  startTime = now;
+                  status = isItem7 ? '발 모음 확인...' : '눈을 감으세요';
+                }
+              } else {
+                status = '서 주세요';
+                message = isItem7 ? '두 발을 모으고 서세요' : '눈을 감고 서 계세요';
+              }
+            } else if (prev.testPhase === 'detecting') {
+              const readyCondition = isItem7 ?
+                (isStanding && feetInfo.feetTogether && now - startTime > 500) :
+                (isStanding && now - startTime > 500);
 
-            if (!isStanding) {
-              postureStability = 'unstable';
-              message = '⚠️ 다시 서세요!';
-            }
+              if (readyCondition) {
+                newPhase = 'in_progress';
+                startTime = now;
+                // 안정성 측정 시작을 위해 히스토리 초기화
+                landmarksHistoryRef.current = [];
+                status = '✓ 타이머 시작!';
+              } else if (!isStanding) {
+                newPhase = 'waiting';
+                startTime = null;
+              } else if (isItem7 && !feetInfo.feetTogether) {
+                status = '발을 더 모아주세요';
+                startTime = now; // 타이머 리셋
+              }
+            } else if (prev.testPhase === 'in_progress') {
+              elapsedTime = (now - startTime) / 1000;
+              confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
 
-            // 완료
-            if (elapsedTime >= targetDuration) {
-              newPhase = 'complete';
-              autoScore = { score: 4, reason: `${targetDuration}초간 안전하게 서 있음` };
-              assessmentReport = { score: 4, duration: elapsedTime };
-              showResultModal = true;
-              status = '✓ 완료!';
+              // 안정성 표시
+              const stabilityText = stabilityInfo.stability === 'excellent' ? '매우 안정' :
+                                   stabilityInfo.stability === 'good' ? '안정' :
+                                   stabilityInfo.stability === 'moderate' ? '보통' : '불안정';
+
+              status = `서 있음: ${Math.floor(elapsedTime)}초 / ${targetDuration}초 (${stabilityText})`;
+
+              // 항목 7: 발 모으기 체크 (새로운 분석 함수 사용)
+              if (isItem7 && !feetInfo.feetTogether) {
+                message = `⚠️ 발을 더 모아주세요 (간격: ${(feetInfo.ankleDistance * 100).toFixed(0)}%)`;
+                postureStability = 'warning';
+              } else {
+                message = `남은 시간: ${Math.ceil(targetDuration - elapsedTime)}초 | 안정성: ${stabilityInfo.score}%`;
+              }
+
+              if (!isStanding) {
+                postureStability = 'unstable';
+                message = '⚠️ 다시 서세요!';
+              }
+
+              // 완료
+              if (elapsedTime >= targetDuration) {
+                newPhase = 'complete';
+                // 안정성에 따른 점수 조정
+                let finalScore = 4;
+                if (stabilityInfo.stability === 'poor' || stabilityInfo.stability === 'unstable') {
+                  finalScore = 3;
+                }
+                autoScore = { score: finalScore, reason: `${targetDuration}초간 서있음 (${stabilityText})` };
+                assessmentReport = { score: finalScore, duration: elapsedTime, stability: stabilityInfo.stability, stabilityScore: stabilityInfo.score };
+                showResultModal = true;
+                status = '✓ 완료!';
+              }
             }
           }
           break;
@@ -2716,7 +2823,7 @@ function BBSTestPage() {
           }
           break;
 
-        // 항목 11: 360도 회전
+        // 항목 11: 360도 회전 (누적 회전량 추적)
         case 'turn_360':
           if (prev.testPhase === 'waiting') {
             if (isStanding) {
@@ -2724,25 +2831,40 @@ function BBSTestPage() {
               status = '한 바퀴 돌아주세요';
               message = '제자리에서 360도 회전하세요';
               startTime = now;
+              // 초기 랜드마크 저장 (회전 기준점)
+              initialLandmarksRef.current = landmarks;
+              motionStateRef.current.cumulativeRotation = 0;
+              motionStateRef.current.lastRotation = 0;
             }
           } else if (prev.testPhase === 'detecting') {
             const elapsed = (now - startTime) / 1000;
-            if (elapsed > 2) {
+            // 누적 회전량 업데이트
+            const rotationDelta = rotationInfo.rotationChange - motionStateRef.current.lastRotation;
+            motionStateRef.current.cumulativeRotation += rotationDelta;
+            motionStateRef.current.lastRotation = rotationInfo.rotationChange;
+
+            const absRotation = Math.abs(motionStateRef.current.cumulativeRotation);
+            confidence = Math.min(100, (absRotation / 330) * 100);
+
+            // 회전 방향 표시
+            const direction = motionStateRef.current.cumulativeRotation > 0 ? '→' : '←';
+            status = `회전 중... ${direction} ${Math.round(absRotation)}°`;
+            message = `남은 회전: ${Math.max(0, 360 - absRotation).toFixed(0)}°`;
+
+            // 330도 이상 회전하면 완료 (약간의 여유)
+            if (absRotation >= 330) {
               newPhase = 'complete';
               const score = elapsed < 4 ? 4 : elapsed < 6 ? 3 : 2;
-              autoScore = { score, reason: `${elapsed.toFixed(1)}초에 회전 완료` };
-              assessmentReport = { score, duration: elapsed };
+              autoScore = { score, reason: `${elapsed.toFixed(1)}초에 360° 회전 완료` };
+              assessmentReport = { score, duration: elapsed, rotation: absRotation };
               showResultModal = true;
               status = '✓ 회전 완료!';
               confidence = 100;
-            } else {
-              confidence = (elapsed / 4) * 100;
-              status = '회전 중...';
             }
           }
           break;
 
-        // 항목 12: 발판에 발 교대로 올리기
+        // 항목 12: 발판에 발 교대로 올리기 (좌우 교대 추적)
         case 'step_alternating':
           if (prev.testPhase === 'waiting') {
             if (isStanding) {
@@ -2751,14 +2873,34 @@ function BBSTestPage() {
               message = '발판에 발을 4회 번갈아 올리세요';
               startTime = now;
               actionCount = 0;
+              motionStateRef.current.stepCount = 0;
+              motionStateRef.current.lastSteppingFoot = null;
             }
           } else if (prev.testPhase === 'detecting') {
-            if (isOneLegRaised && !actionDetected) {
-              actionCount++;
-              actionDetected = true;
-              status = `발 올리기 ${actionCount}/4회`;
-              confidence = (actionCount / 4) * 100;
-            } else if (!isOneLegRaised) {
+            // 발 교대 감지 (새로운 분석 함수 사용)
+            const footStepInfo = detectFootStep(landmarks, previousLandmarksRef.current);
+
+            if (singleLegInfo.isSingleLeg && !actionDetected) {
+              const currentFoot = singleLegInfo.liftedFoot;
+              const lastFoot = motionStateRef.current.lastSteppingFoot;
+
+              // 교대로 올렸는지 확인
+              if (lastFoot === null || currentFoot !== lastFoot) {
+                actionCount++;
+                motionStateRef.current.stepCount = actionCount;
+                motionStateRef.current.lastSteppingFoot = currentFoot;
+                actionDetected = true;
+
+                const footText = currentFoot === 'left' ? '왼발' : '오른발';
+                status = `${footText} 올림 ${actionCount}/4회`;
+                message = actionCount < 4 ? `다음: ${currentFoot === 'left' ? '오른발' : '왼발'}` : '완료!';
+                confidence = (actionCount / 4) * 100;
+              } else {
+                // 같은 발 연속 사용
+                status = `⚠️ 같은 발 연속! ${actionCount}/4회`;
+                message = `반대쪽 발(${currentFoot === 'left' ? '오른발' : '왼발'})을 올려주세요`;
+              }
+            } else if (!singleLegInfo.isSingleLeg) {
               actionDetected = false;
             }
 
@@ -2766,67 +2908,98 @@ function BBSTestPage() {
               const elapsed = (now - startTime) / 1000;
               newPhase = 'complete';
               const score = elapsed < 20 ? 4 : 3;
-              autoScore = { score, reason: `4회 완료 (${elapsed.toFixed(1)}초)` };
-              assessmentReport = { score, count: actionCount, duration: elapsed };
+              autoScore = { score, reason: `4회 교대 완료 (${elapsed.toFixed(1)}초)` };
+              assessmentReport = { score, count: actionCount, duration: elapsed, alternating: true };
               showResultModal = true;
               status = '✓ 완료!';
             }
           }
           break;
 
-        // 항목 13: 일렬로 서기 (탄뎀 서기)
+        // 항목 13: 일렬로 서기 (탄뎀 서기) - 발 정렬 분석 개선
         case 'tandem_stance':
           if (prev.testPhase === 'waiting') {
             if (isStanding) {
               newPhase = 'detecting';
               status = '한 발을 다른 발 앞에 놓으세요';
-              message = '일렬로 서세요';
+              message = '일렬로 서세요 (발뒤꿈치-발끝 정렬)';
               startTime = now;
             }
           } else if (prev.testPhase === 'detecting') {
-            // 발이 일렬인지 체크 (x좌표가 비슷)
-            const feetInLine = Math.abs(leftAnkle.x - rightAnkle.x) < 0.08;
-            if (feetInLine && isStanding) {
+            // 탄뎀 자세 감지 (새로운 분석 함수 사용)
+            const isTandemPose = feetInfo.isTandem || feetInfo.footXDiff < 0.1;
+
+            if (isTandemPose && isStanding) {
               newPhase = 'in_progress';
               startTime = now;
-              status = '일렬 자세 확인!';
+              status = '✓ 탄뎀 자세 확인!';
+              message = '자세를 유지하세요';
+            } else {
+              // 발 정렬 가이드
+              const xDiff = feetInfo.footXDiff;
+              if (xDiff > 0.15) {
+                message = '발을 더 가깝게 정렬하세요';
+              } else if (xDiff > 0.1) {
+                message = '조금만 더 정렬하세요...';
+              }
+              status = `발 정렬 중... (간격: ${(xDiff * 100).toFixed(0)}%)`;
             }
           } else if (prev.testPhase === 'in_progress') {
             elapsedTime = (now - startTime) / 1000;
             confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
-            status = `일렬 서기: ${Math.floor(elapsedTime)}초 / ${targetDuration}초`;
+
+            // 자세 유지 확인
+            const isMaintained = feetInfo.isTandem || feetInfo.footXDiff < 0.12;
+
+            if (isMaintained) {
+              status = `일렬 서기: ${Math.floor(elapsedTime)}초 / ${targetDuration}초`;
+              message = `남은 시간: ${Math.ceil(targetDuration - elapsedTime)}초`;
+            } else {
+              status = `⚠️ 자세 유지! ${Math.floor(elapsedTime)}초`;
+              message = '발 정렬을 유지하세요';
+              postureStability = 'unstable';
+            }
 
             if (elapsedTime >= targetDuration) {
               newPhase = 'complete';
-              autoScore = { score: 4, reason: `${targetDuration}초간 일렬 서기 완료` };
-              assessmentReport = { score: 4, duration: elapsedTime };
+              autoScore = { score: 4, reason: `${targetDuration}초간 탄뎀 자세 완료` };
+              assessmentReport = { score: 4, duration: elapsedTime, tandem: true };
               showResultModal = true;
               status = '✓ 완료!';
             }
           }
           break;
 
-        // 항목 14: 한 발로 서기
+        // 항목 14: 한 발로 서기 (발 식별 및 안정성 분석)
         case 'single_leg_stance':
           if (prev.testPhase === 'waiting') {
             if (isStanding) {
               newPhase = 'detecting';
               status = '한 발을 드세요';
-              message = '한 발로 최대한 오래 서세요';
+              message = '한 발로 최대한 오래 서세요 (지지 없이)';
               startTime = now;
             }
           } else if (prev.testPhase === 'detecting') {
-            if (isOneLegRaised) {
+            if (singleLegInfo.isSingleLeg) {
               newPhase = 'in_progress';
               startTime = now;
-              status = '한 발 들기 시작!';
+              const footText = singleLegInfo.liftedFoot === 'left' ? '왼발' : '오른발';
+              status = `${footText} 들기 시작!`;
             }
           } else if (prev.testPhase === 'in_progress') {
             elapsedTime = (now - startTime) / 1000;
             confidence = Math.min(100, (elapsedTime / targetDuration) * 100);
-            status = `한 발 서기: ${elapsedTime.toFixed(1)}초`;
 
-            if (!isOneLegRaised || !isStanding) {
+            // 들고 있는 발 표시 및 안정성 분석
+            const footText = singleLegInfo.liftedFoot === 'left' ? '왼발' : '오른발';
+            const stabilityText = stabilityInfo.stability === 'excellent' ? '안정' :
+                                 stabilityInfo.stability === 'good' ? '양호' :
+                                 stabilityInfo.stability === 'moderate' ? '보통' : '불안정';
+
+            status = `${footText} 서기: ${elapsedTime.toFixed(1)}초 (${stabilityText})`;
+            message = `안정성 점수: ${stabilityInfo.score}%`;
+
+            if (!singleLegInfo.isSingleLeg || !isStanding) {
               // 발을 내림
               newPhase = 'complete';
               let score = 0;
@@ -2834,17 +3007,23 @@ function BBSTestPage() {
               else if (elapsedTime >= 5) score = 3;
               else if (elapsedTime >= 3) score = 2;
               else score = 1;
-              autoScore = { score, reason: `${elapsedTime.toFixed(1)}초간 한 발 서기` };
-              assessmentReport = { score, duration: elapsedTime };
+
+              // 안정성에 따른 감점 (불안정하면 -1)
+              if (stabilityInfo.stability === 'poor' || stabilityInfo.stability === 'unstable') {
+                score = Math.max(1, score - 1);
+              }
+
+              autoScore = { score, reason: `${elapsedTime.toFixed(1)}초간 한 발 서기 (${stabilityText})` };
+              assessmentReport = { score, duration: elapsedTime, stability: stabilityInfo.stability, stabilityScore: stabilityInfo.score };
               showResultModal = true;
-              status = `✓ ${elapsedTime.toFixed(1)}초 유지!`;
+              status = `✓ ${elapsedTime.toFixed(1)}초 유지! (${stabilityText})`;
             }
 
             // 10초 달성
             if (elapsedTime >= targetDuration) {
               newPhase = 'complete';
-              autoScore = { score: 4, reason: `${targetDuration}초 이상 한 발 서기 완료` };
-              assessmentReport = { score: 4, duration: elapsedTime };
+              autoScore = { score: 4, reason: `${targetDuration}초 이상 한 발 서기 완료 (${stabilityText})` };
+              assessmentReport = { score: 4, duration: elapsedTime, stability: stabilityInfo.stability, stabilityScore: stabilityInfo.score };
               showResultModal = true;
               status = '✓ 완료!';
             }
@@ -3190,7 +3369,7 @@ function BBSTestPage() {
     }
 
     const runAutoSync = async () => {
-      console.log('[AutoSync] 자동 오디오 싱크 시작...');
+      console.log(`[AutoSync] 항목 ${currentItem + 1} 자동 오디오 싱크 시작...`);
       setVideoSyncInfo(prev => ({ ...prev, syncing: true, error: null }));
 
       try {
@@ -3243,11 +3422,11 @@ function BBSTestPage() {
 
         // 콘솔에 싱크 완료 로그
         if (result.side_trim > 0) {
-          console.log(`[AutoSync] ✓ ${method} 싱크 완료 - 측면 영상 ${result.side_trim.toFixed(3)}초 트리밍`);
+          console.log(`[AutoSync] ✓ 항목 ${currentItem + 1} ${method} 싱크 완료 - 측면 영상 ${result.side_trim.toFixed(3)}초 트리밍`);
         } else if (result.front_trim > 0) {
-          console.log(`[AutoSync] ✓ ${method} 싱크 완료 - 정면 영상 ${result.front_trim.toFixed(3)}초 트리밍`);
+          console.log(`[AutoSync] ✓ 항목 ${currentItem + 1} ${method} 싱크 완료 - 정면 영상 ${result.front_trim.toFixed(3)}초 트리밍`);
         } else {
-          console.log(`[AutoSync] ✓ ${method} 싱크 완료 - 영상이 이미 동기화됨`);
+          console.log(`[AutoSync] ✓ 항목 ${currentItem + 1} ${method} 싱크 완료 - 영상이 이미 동기화됨`);
         }
       } catch (error) {
         console.error('[AutoSync] 싱크 감지 실패:', error);
@@ -3262,7 +3441,7 @@ function BBSTestPage() {
     // 약간의 딜레이 후 자동 싱크 실행 (영상 로드 완료 대기)
     const timer = setTimeout(runAutoSync, 500);
     return () => clearTimeout(timer);
-  }, [sideVideoUrl, frontVideoUrl, videoSyncInfo.synced, videoSyncInfo.syncing]);
+  }, [sideVideoUrl, frontVideoUrl, videoSyncInfo.synced, videoSyncInfo.syncing, currentItem]);
 
   // 항목 전환 시 비디오 ref 초기화
   useEffect(() => {
@@ -3288,17 +3467,7 @@ function BBSTestPage() {
     setFrontVideoDuration(0);
     setIsSideVideoPaused(true);
     setIsFrontVideoPaused(true);
-    // 싱크 상태 초기화
-    setVideoSyncInfo({
-      offset: 0,
-      sideTrim: 0,
-      frontTrim: 0,
-      confidence: 0,
-      method: null,
-      synced: false,
-      syncing: false,
-      error: null
-    });
+    // 싱크 상태는 항목별로 저장되므로 리셋하지 않음
   }, [currentItem]);
 
   // 단일 영상 분석 초기화 헬퍼 함수
@@ -3609,8 +3778,13 @@ function BBSTestPage() {
 
       // 1. 측면 영상 먼저 초기화 (autoPlay = false)
       if (sideVideoUrl && sideVideoRef.current) {
-        console.log('Starting side video analysis...');
-        console.log('Side trim time:', videoSyncInfo.sideTrim || 0);
+        console.log(`[항목 ${currentItem + 1}] Starting side video analysis...`);
+        console.log(`[항목 ${currentItem + 1}] 싱크 정보:`, {
+          sideTrim: videoSyncInfo.sideTrim,
+          frontTrim: videoSyncInfo.frontTrim,
+          synced: videoSyncInfo.synced,
+          method: videoSyncInfo.method
+        });
         try {
           const sideResult = await initSingleVideoAnalysis(
             sideVideoRef, sideCanvasRef, sidePoseRef, sideAnalysisRef,
@@ -3633,7 +3807,7 @@ function BBSTestPage() {
 
       // 2. 측면 초기화 완료 후 정면 영상 초기화 (1초 대기로 MediaPipe 안정화)
       if (frontVideoUrl && frontVideoRef.current) {
-        console.log('Waiting before front video init...');
+        console.log(`[항목 ${currentItem + 1}] Waiting before front video init...`);
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         console.log('Starting front video analysis...');
@@ -3661,7 +3835,7 @@ function BBSTestPage() {
       console.log('All video init results:', results);
 
       // 3. 두 영상 동시 재생 시작!
-      console.log('=== Starting simultaneous playback ===');
+      console.log(`[항목 ${currentItem + 1}] === Starting simultaneous playback ===`);
       const playbackPromises = [];
       if (sideStartPlayback) {
         console.log('Adding side video to simultaneous playback');
@@ -3684,7 +3858,7 @@ function BBSTestPage() {
       setCameraLoading(false);
       return null;
     }
-  }, [sideVideoUrl, frontVideoUrl, initSingleVideoAnalysis, videoSyncInfo]);
+  }, [sideVideoUrl, frontVideoUrl, initSingleVideoAnalysis, videoSyncInfo, currentItem]);
 
   // 측면 동영상 재생/일시정지 토글
   const toggleSideVideoPause = useCallback(() => {
@@ -4024,6 +4198,17 @@ function BBSTestPage() {
       initialTrunkAngle: null
     }));
 
+    // BBS 모션 분석 refs 초기화
+    landmarksHistoryRef.current = [];
+    previousLandmarksRef.current = null;
+    initialLandmarksRef.current = null;
+    motionStateRef.current = {
+      stepCount: 0,
+      lastSteppingFoot: null,
+      cumulativeRotation: 0,
+      lastRotation: 0
+    };
+
     if (currentItem < 13) {
       setCurrentItem(prev => prev + 1);
     } else {
@@ -4097,6 +4282,17 @@ function BBSTestPage() {
     setIsAnalyzing(false);
     setItemTimer(0);
     setCurrentLandmarks(null);
+
+    // BBS 모션 분석 refs 초기화
+    landmarksHistoryRef.current = [];
+    previousLandmarksRef.current = null;
+    initialLandmarksRef.current = null;
+    motionStateRef.current = {
+      stepCount: 0,
+      lastSteppingFoot: null,
+      cumulativeRotation: 0,
+      lastRotation: 0
+    };
   };
 
   // 이전 항목으로 이동
