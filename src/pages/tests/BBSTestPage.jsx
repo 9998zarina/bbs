@@ -24,6 +24,7 @@ import {
 import { BBS_ITEMS } from '../../constants';
 import { useNavigation, PAGES } from '../../context/NavigationContext';
 import { useTestHistory } from '../../context/TestHistoryContext';
+import { detectOffsetClient, detectOffsetAudio, applyOffsetToVideos } from '../../utils/videoSync';
 
 /**
  * 음성 안내 함수 (비활성화됨)
@@ -213,6 +214,18 @@ function BBSTestPage() {
   // 현재 항목의 영상 URL (편의를 위한 계산된 값)
   const sideVideoUrl = itemVideos[currentItem]?.side;
   const frontVideoUrl = itemVideos[currentItem]?.front;
+
+  // 영상 싱크 상태
+  const [videoSyncInfo, setVideoSyncInfo] = useState({
+    offset: 0,
+    sideTrim: 0,    // 측면 트리밍 시간 (초)
+    frontTrim: 0,   // 정면 트리밍 시간 (초)
+    confidence: 0,
+    method: null,   // 'audio' or 'motion'
+    synced: false,
+    syncing: false,
+    error: null
+  });
 
   // 현재 항목 영상 설정 함수
   const setCurrentItemVideo = (type, url) => {
@@ -3080,6 +3093,177 @@ function BBSTestPage() {
     setFrontVideoDuration(0);
   }, [frontVideoUrl]);
 
+  // 영상 자동 싱크 함수 (오디오 Cross-Correlation 기반)
+  const handleAutoSync = useCallback(async () => {
+    if (!sideVideoUrl || !frontVideoUrl) {
+      alert('측면과 정면 영상을 모두 업로드해주세요.');
+      return;
+    }
+
+    setVideoSyncInfo(prev => ({ ...prev, syncing: true, error: null }));
+
+    try {
+      console.log('[VideoSync] 오디오 기반 자동 싱크 시작...');
+
+      // Blob URL에서 File 객체 가져오기
+      const [sideResponse, frontResponse] = await Promise.all([
+        fetch(sideVideoUrl),
+        fetch(frontVideoUrl)
+      ]);
+
+      const [sideBlob, frontBlob] = await Promise.all([
+        sideResponse.blob(),
+        frontResponse.blob()
+      ]);
+
+      // File 객체 생성
+      const sideFile = new File([sideBlob], 'side.mov', { type: 'video/quicktime' });
+      const frontFile = new File([frontBlob], 'front.mov', { type: 'video/quicktime' });
+
+      // 오디오 기반 싱크 감지 (Python 백엔드 호출)
+      let result;
+      let method = 'audio';
+
+      try {
+        result = await detectOffsetAudio(sideFile, frontFile);
+        console.log('[VideoSync] 오디오 싱크 결과:', result);
+        // result: { offset_ms, offset_sec, side_trim, front_trim, confidence }
+      } catch (audioError) {
+        console.warn('[VideoSync] 오디오 싱크 실패, 동작 감지로 전환:', audioError);
+        // 오디오 실패 시 클라이언트 동작 감지로 폴백
+        method = 'motion';
+        const motionResult = await detectOffsetClient(sideVideoUrl, frontVideoUrl);
+        result = {
+          offset_sec: motionResult.offset,
+          offset_ms: motionResult.offset * 1000,
+          side_trim: motionResult.skipSide,
+          front_trim: motionResult.skipFront,
+          confidence: 0.5
+        };
+      }
+
+      console.log('[VideoSync] 최종 결과:', { ...result, method });
+      setVideoSyncInfo({
+        offset: result.offset_sec,
+        sideTrim: result.side_trim,
+        frontTrim: result.front_trim,
+        confidence: result.confidence,
+        method: method,
+        synced: true,
+        syncing: false,
+        error: null
+      });
+
+      // 결과 알림
+      const offsetMs = Math.abs(result.offset_ms).toFixed(0);
+      const methodText = method === 'audio' ? '🎵 오디오' : '📹 동작';
+      const confidenceText = result.confidence ? ` (신뢰도: ${Math.round(result.confidence * 100)}%)` : '';
+
+      if (result.side_trim > 0) {
+        alert(`✓ ${methodText} 싱크 완료!\n측면 영상을 ${result.side_trim.toFixed(3)}초 트리밍합니다.${confidenceText}`);
+      } else if (result.front_trim > 0) {
+        alert(`✓ ${methodText} 싱크 완료!\n정면 영상을 ${result.front_trim.toFixed(3)}초 트리밍합니다.${confidenceText}`);
+      } else {
+        alert(`✓ ${methodText} 싱크 완료!\n영상이 이미 동기화되어 있습니다.${confidenceText}`);
+      }
+    } catch (error) {
+      console.error('[VideoSync] 싱크 감지 실패:', error);
+      setVideoSyncInfo(prev => ({
+        ...prev,
+        syncing: false,
+        error: error.message
+      }));
+      alert(`싱크 감지 실패: ${error.message}`);
+    }
+  }, [sideVideoUrl, frontVideoUrl]);
+
+  // 자동 오디오 싱크 - 두 영상이 모두 업로드되면 자동 실행
+  useEffect(() => {
+    // 이미 싱크 완료되었거나 싱크 중이면 스킵
+    if (videoSyncInfo.synced || videoSyncInfo.syncing) {
+      return;
+    }
+
+    // 두 영상이 모두 있을 때만 자동 싱크
+    if (!sideVideoUrl || !frontVideoUrl) {
+      return;
+    }
+
+    const runAutoSync = async () => {
+      console.log('[AutoSync] 자동 오디오 싱크 시작...');
+      setVideoSyncInfo(prev => ({ ...prev, syncing: true, error: null }));
+
+      try {
+        // Blob URL에서 File 객체 가져오기
+        const [sideResponse, frontResponse] = await Promise.all([
+          fetch(sideVideoUrl),
+          fetch(frontVideoUrl)
+        ]);
+
+        const [sideBlob, frontBlob] = await Promise.all([
+          sideResponse.blob(),
+          frontResponse.blob()
+        ]);
+
+        // File 객체 생성
+        const sideFile = new File([sideBlob], 'side.mov', { type: 'video/quicktime' });
+        const frontFile = new File([frontBlob], 'front.mov', { type: 'video/quicktime' });
+
+        // 오디오 기반 싱크 감지 (Python 백엔드 호출)
+        let result;
+        let method = 'audio';
+
+        try {
+          result = await detectOffsetAudio(sideFile, frontFile);
+          console.log('[AutoSync] 오디오 싱크 결과:', result);
+        } catch (audioError) {
+          console.warn('[AutoSync] 오디오 싱크 실패, 동작 감지로 전환:', audioError);
+          method = 'motion';
+          const motionResult = await detectOffsetClient(sideVideoUrl, frontVideoUrl);
+          result = {
+            offset_sec: motionResult.offset,
+            offset_ms: motionResult.offset * 1000,
+            side_trim: motionResult.skipSide,
+            front_trim: motionResult.skipFront,
+            confidence: 0.5
+          };
+        }
+
+        console.log('[AutoSync] 최종 결과:', { ...result, method });
+        setVideoSyncInfo({
+          offset: result.offset_sec,
+          sideTrim: result.side_trim,
+          frontTrim: result.front_trim,
+          confidence: result.confidence,
+          method: method,
+          synced: true,
+          syncing: false,
+          error: null
+        });
+
+        // 콘솔에 싱크 완료 로그
+        if (result.side_trim > 0) {
+          console.log(`[AutoSync] ✓ ${method} 싱크 완료 - 측면 영상 ${result.side_trim.toFixed(3)}초 트리밍`);
+        } else if (result.front_trim > 0) {
+          console.log(`[AutoSync] ✓ ${method} 싱크 완료 - 정면 영상 ${result.front_trim.toFixed(3)}초 트리밍`);
+        } else {
+          console.log(`[AutoSync] ✓ ${method} 싱크 완료 - 영상이 이미 동기화됨`);
+        }
+      } catch (error) {
+        console.error('[AutoSync] 싱크 감지 실패:', error);
+        setVideoSyncInfo(prev => ({
+          ...prev,
+          syncing: false,
+          error: error.message
+        }));
+      }
+    };
+
+    // 약간의 딜레이 후 자동 싱크 실행 (영상 로드 완료 대기)
+    const timer = setTimeout(runAutoSync, 500);
+    return () => clearTimeout(timer);
+  }, [sideVideoUrl, frontVideoUrl, videoSyncInfo.synced, videoSyncInfo.syncing]);
+
   // 항목 전환 시 비디오 ref 초기화
   useEffect(() => {
     // 항목이 변경되면 비디오 ref의 src를 초기화하여 이전 영상이 표시되지 않도록 함
@@ -3104,12 +3288,23 @@ function BBSTestPage() {
     setFrontVideoDuration(0);
     setIsSideVideoPaused(true);
     setIsFrontVideoPaused(true);
+    // 싱크 상태 초기화
+    setVideoSyncInfo({
+      offset: 0,
+      sideTrim: 0,
+      frontTrim: 0,
+      confidence: 0,
+      method: null,
+      synced: false,
+      syncing: false,
+      error: null
+    });
   }, [currentItem]);
 
   // 단일 영상 분석 초기화 헬퍼 함수
   const initSingleVideoAnalysis = useCallback(async (
     videoRef, canvasRef, poseRef, analysisRef,
-    videoUrl, setProgress, setDuration, setPaused, setLandmarks, viewType
+    videoUrl, setProgress, setDuration, setPaused, setLandmarks, viewType, trimTime = 0, autoPlay = true
   ) => {
     console.log(`[${viewType}] initSingleVideoAnalysis called`);
     console.log(`[${viewType}] videoRef.current:`, videoRef.current);
@@ -3342,20 +3537,32 @@ function BBSTestPage() {
       analysisRef.current = requestAnimationFrame(analyzeVideoFrame);
     };
 
-    // 비디오 재생 시작
-    console.log(`[${viewType}] Starting video playback...`);
-    try {
-      await video.play();
-      console.log(`[${viewType}] Video playing successfully`);
-    } catch (playError) {
-      console.error(`[${viewType}] Video play error:`, playError);
-      // 자동 재생이 차단된 경우에도 계속 진행
+    // 싱크 오프셋 적용 (트리밍)
+    if (trimTime > 0) {
+      console.log(`[${viewType}] Applying sync trim: ${trimTime.toFixed(3)}s`);
+      video.currentTime = trimTime;
     }
-    setPaused(false);
-    analyzeVideoFrame();
 
-    console.log(`[${viewType}] Analysis started`);
-    return true;
+    // 재생 시작 함수 (나중에 호출 가능)
+    const startPlayback = async () => {
+      console.log(`[${viewType}] Starting video playback from ${video.currentTime.toFixed(3)}s...`);
+      try {
+        await video.play();
+        console.log(`[${viewType}] Video playing successfully`);
+      } catch (playError) {
+        console.error(`[${viewType}] Video play error:`, playError);
+      }
+      setPaused(false);
+      analyzeVideoFrame();
+    };
+
+    // autoPlay가 true면 바로 재생 시작
+    if (autoPlay) {
+      await startPlayback();
+    }
+
+    console.log(`[${viewType}] Analysis initialized (autoPlay: ${autoPlay})`);
+    return { success: true, startPlayback, video };
   }, [isItem1, isItem2, handleItem1Analysis, handleItem2Analysis, handleGeneralAnalysis, detectViewType]);
 
   // 양쪽 동영상 병렬 분석 초기화
@@ -3395,19 +3602,27 @@ function BBSTestPage() {
       setVideo1DetectedType('unknown');
       setVideo2DetectedType('unknown');
 
-      // 순차 초기화 (MediaPipe 충돌 방지)
+      // 순차 초기화 (MediaPipe 충돌 방지) - 재생은 나중에 동시에
       const results = [];
+      let sideStartPlayback = null;
+      let frontStartPlayback = null;
 
-      // 1. 측면 영상 먼저 초기화
+      // 1. 측면 영상 먼저 초기화 (autoPlay = false)
       if (sideVideoUrl && sideVideoRef.current) {
         console.log('Starting side video analysis...');
+        console.log('Side trim time:', videoSyncInfo.sideTrim || 0);
         try {
           const sideResult = await initSingleVideoAnalysis(
             sideVideoRef, sideCanvasRef, sidePoseRef, sideAnalysisRef,
-            sideVideoUrl, setSideVideoProgress, setSideVideoDuration, setIsSideVideoPaused, setSideLandmarks, 'side'
+            sideVideoUrl, setSideVideoProgress, setSideVideoDuration, setIsSideVideoPaused, setSideLandmarks, 'side',
+            videoSyncInfo.sideTrim || 0,
+            false  // autoPlay = false
           );
           console.log('Side video analysis result:', sideResult);
           results.push({ type: 'side', result: sideResult });
+          if (sideResult && sideResult.startPlayback) {
+            sideStartPlayback = sideResult.startPlayback;
+          }
         } catch (e) {
           console.error('Side video init error:', e);
           results.push({ type: 'side', result: null, error: e });
@@ -3422,13 +3637,19 @@ function BBSTestPage() {
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         console.log('Starting front video analysis...');
+        console.log('Front trim time:', videoSyncInfo.frontTrim || 0);
         try {
           const frontResult = await initSingleVideoAnalysis(
             frontVideoRef, frontCanvasRef, frontPoseRef, frontAnalysisRef,
-            frontVideoUrl, setFrontVideoProgress, setFrontVideoDuration, setIsFrontVideoPaused, setFrontLandmarks, 'front'
+            frontVideoUrl, setFrontVideoProgress, setFrontVideoDuration, setIsFrontVideoPaused, setFrontLandmarks, 'front',
+            videoSyncInfo.frontTrim || 0,
+            false  // autoPlay = false
           );
           console.log('Front video analysis result:', frontResult);
           results.push({ type: 'front', result: frontResult });
+          if (frontResult && frontResult.startPlayback) {
+            frontStartPlayback = frontResult.startPlayback;
+          }
         } catch (e) {
           console.error('Front video init error:', e);
           results.push({ type: 'front', result: null, error: e });
@@ -3439,14 +3660,31 @@ function BBSTestPage() {
 
       console.log('All video init results:', results);
 
+      // 3. 두 영상 동시 재생 시작!
+      console.log('=== Starting simultaneous playback ===');
+      const playbackPromises = [];
+      if (sideStartPlayback) {
+        console.log('Adding side video to simultaneous playback');
+        playbackPromises.push(sideStartPlayback());
+      }
+      if (frontStartPlayback) {
+        console.log('Adding front video to simultaneous playback');
+        playbackPromises.push(frontStartPlayback());
+      }
+
+      if (playbackPromises.length > 0) {
+        await Promise.all(playbackPromises);
+        console.log('=== Both videos started simultaneously ===');
+      }
+
       setCameraLoading(false);
-      return results.some(r => r.result);
+      return results.some(r => r.result && r.result.success);
     } catch (error) {
       console.error('Video analysis init error:', error);
       setCameraLoading(false);
       return null;
     }
-  }, [sideVideoUrl, frontVideoUrl, initSingleVideoAnalysis]);
+  }, [sideVideoUrl, frontVideoUrl, initSingleVideoAnalysis, videoSyncInfo]);
 
   // 측면 동영상 재생/일시정지 토글
   const toggleSideVideoPause = useCallback(() => {
@@ -4933,6 +5171,91 @@ function BBSTestPage() {
               </div>
             </div>
 
+            {/* 자동 싱크 버튼 - 항목 1 */}
+            {sideVideoUrl && frontVideoUrl && !isAnalyzing && (
+              <div className="mt-3 p-3 bg-slate-800/50 rounded-xl border border-slate-700">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-white font-medium text-sm">
+                      {videoSyncInfo.syncing ? '🎵 오디오 싱크 감지 중...' : '영상 싱크 맞춤'}
+                    </h4>
+                    <p className="text-slate-400 text-xs">
+                      {videoSyncInfo.syncing
+                        ? '오디오 Cross-Correlation으로 분석 중입니다'
+                        : videoSyncInfo.synced
+                        ? '✓ 분석 시작 시 자동으로 트리밍됩니다'
+                        : '두 영상을 업로드하면 자동으로 싱크됩니다'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleAutoSync}
+                    disabled={videoSyncInfo.syncing}
+                    className={`px-3 py-1.5 rounded-lg font-medium text-sm transition-all ${
+                      videoSyncInfo.syncing
+                        ? 'bg-slate-600 text-slate-400 cursor-not-allowed'
+                        : videoSyncInfo.synced
+                        ? 'bg-green-600 hover:bg-green-700 text-white'
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                    }`}
+                  >
+                    {videoSyncInfo.syncing ? (
+                      <span className="flex items-center gap-2">
+                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        분석 중...
+                      </span>
+                    ) : videoSyncInfo.synced ? (
+                      '✓ 싱크 완료'
+                    ) : (
+                      '자동 싱크'
+                    )}
+                  </button>
+                </div>
+
+                {/* 싱크 결과 표시 */}
+                {videoSyncInfo.synced && (
+                  <div className="mt-2 bg-slate-900/50 rounded-lg p-2 text-sm">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                        videoSyncInfo.method === 'audio' ? 'bg-purple-500/30 text-purple-300' : 'bg-blue-500/30 text-blue-300'
+                      }`}>
+                        {videoSyncInfo.method === 'audio' ? '🎵 오디오' : '📹 동작'}
+                      </span>
+                      {videoSyncInfo.confidence > 0 && (
+                        <span className={`text-xs ${
+                          videoSyncInfo.confidence > 0.5 ? 'text-green-400' : 'text-yellow-400'
+                        }`}>
+                          신뢰도: {Math.round(videoSyncInfo.confidence * 100)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-center">
+                      <div>
+                        <div className="text-slate-400 text-xs">측면 트리밍</div>
+                        <div className={`font-mono text-xs font-bold ${videoSyncInfo.sideTrim > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                          {videoSyncInfo.sideTrim.toFixed(3)}s
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400 text-xs">정면 트리밍</div>
+                        <div className={`font-mono text-xs font-bold ${videoSyncInfo.frontTrim > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                          {videoSyncInfo.frontTrim.toFixed(3)}s
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {videoSyncInfo.error && (
+                  <div className="mt-2 text-red-400 text-xs">
+                    오류: {videoSyncInfo.error}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* 시작 전 */}
             {!isAnalyzing && !cameraLoading && (
               <div className="mt-4 text-center">
@@ -5462,6 +5785,91 @@ function BBSTestPage() {
                 )}
               </div>
             </div>
+
+            {/* 자동 싱크 버튼 - 항목 2 */}
+            {sideVideoUrl && frontVideoUrl && !isAnalyzing && (
+              <div className="mt-3 p-3 bg-slate-800/50 rounded-xl border border-slate-700">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-white font-medium text-sm">
+                      {videoSyncInfo.syncing ? '🎵 오디오 싱크 감지 중...' : '영상 싱크 맞춤'}
+                    </h4>
+                    <p className="text-slate-400 text-xs">
+                      {videoSyncInfo.syncing
+                        ? '오디오 Cross-Correlation으로 분석 중입니다'
+                        : videoSyncInfo.synced
+                        ? '✓ 분석 시작 시 자동으로 트리밍됩니다'
+                        : '두 영상을 업로드하면 자동으로 싱크됩니다'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleAutoSync}
+                    disabled={videoSyncInfo.syncing}
+                    className={`px-3 py-1.5 rounded-lg font-medium text-sm transition-all ${
+                      videoSyncInfo.syncing
+                        ? 'bg-slate-600 text-slate-400 cursor-not-allowed'
+                        : videoSyncInfo.synced
+                        ? 'bg-green-600 hover:bg-green-700 text-white'
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                    }`}
+                  >
+                    {videoSyncInfo.syncing ? (
+                      <span className="flex items-center gap-2">
+                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                        </svg>
+                        분석 중...
+                      </span>
+                    ) : videoSyncInfo.synced ? (
+                      '✓ 싱크 완료'
+                    ) : (
+                      '자동 싱크'
+                    )}
+                  </button>
+                </div>
+
+                {/* 싱크 결과 표시 */}
+                {videoSyncInfo.synced && (
+                  <div className="mt-2 bg-slate-900/50 rounded-lg p-2 text-sm">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                        videoSyncInfo.method === 'audio' ? 'bg-purple-500/30 text-purple-300' : 'bg-blue-500/30 text-blue-300'
+                      }`}>
+                        {videoSyncInfo.method === 'audio' ? '🎵 오디오' : '📹 동작'}
+                      </span>
+                      {videoSyncInfo.confidence > 0 && (
+                        <span className={`text-xs ${
+                          videoSyncInfo.confidence > 0.5 ? 'text-green-400' : 'text-yellow-400'
+                        }`}>
+                          신뢰도: {Math.round(videoSyncInfo.confidence * 100)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-center">
+                      <div>
+                        <div className="text-slate-400 text-xs">측면 트리밍</div>
+                        <div className={`font-mono text-xs font-bold ${videoSyncInfo.sideTrim > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                          {videoSyncInfo.sideTrim.toFixed(3)}s
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-slate-400 text-xs">정면 트리밍</div>
+                        <div className={`font-mono text-xs font-bold ${videoSyncInfo.frontTrim > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                          {videoSyncInfo.frontTrim.toFixed(3)}s
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {videoSyncInfo.error && (
+                  <div className="mt-2 text-red-400 text-xs">
+                    오류: {videoSyncInfo.error}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* 시작 전 */}
             {!isAnalyzing && !cameraLoading && (
@@ -6133,6 +6541,91 @@ function BBSTestPage() {
               )}
             </div>
           </div>
+
+          {/* 자동 싱크 버튼 - 검사 화면 */}
+          {sideVideoUrl && frontVideoUrl && !isAnalyzing && (
+            <div className="mt-3 p-3 bg-slate-800/50 rounded-xl border border-slate-700">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-white font-medium text-sm">
+                    {videoSyncInfo.syncing ? '🎵 오디오 싱크 감지 중...' : '영상 싱크 맞춤'}
+                  </h4>
+                  <p className="text-slate-400 text-xs">
+                    {videoSyncInfo.syncing
+                      ? '오디오 Cross-Correlation으로 분석 중입니다'
+                      : videoSyncInfo.synced
+                      ? '✓ 분석 시작 시 자동으로 트리밍됩니다'
+                      : '두 영상을 업로드하면 자동으로 싱크됩니다'}
+                  </p>
+                </div>
+                <button
+                  onClick={handleAutoSync}
+                  disabled={videoSyncInfo.syncing}
+                  className={`px-3 py-1.5 rounded-lg font-medium text-sm transition-all ${
+                    videoSyncInfo.syncing
+                      ? 'bg-slate-600 text-slate-400 cursor-not-allowed'
+                      : videoSyncInfo.synced
+                      ? 'bg-green-600 hover:bg-green-700 text-white'
+                      : 'bg-blue-600 hover:bg-blue-700 text-white'
+                  }`}
+                >
+                  {videoSyncInfo.syncing ? (
+                    <span className="flex items-center gap-2">
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      분석 중...
+                    </span>
+                  ) : videoSyncInfo.synced ? (
+                    '✓ 싱크 완료'
+                  ) : (
+                    '자동 싱크'
+                  )}
+                </button>
+              </div>
+
+              {/* 싱크 결과 표시 */}
+              {videoSyncInfo.synced && (
+                <div className="mt-2 bg-slate-900/50 rounded-lg p-2 text-sm">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                      videoSyncInfo.method === 'audio' ? 'bg-purple-500/30 text-purple-300' : 'bg-blue-500/30 text-blue-300'
+                    }`}>
+                      {videoSyncInfo.method === 'audio' ? '🎵 오디오' : '📹 동작'}
+                    </span>
+                    {videoSyncInfo.confidence > 0 && (
+                      <span className={`text-xs ${
+                        videoSyncInfo.confidence > 0.5 ? 'text-green-400' : 'text-yellow-400'
+                      }`}>
+                        신뢰도: {Math.round(videoSyncInfo.confidence * 100)}%
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div>
+                      <div className="text-slate-400 text-xs">측면 트리밍</div>
+                      <div className={`font-mono text-xs font-bold ${videoSyncInfo.sideTrim > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                        {videoSyncInfo.sideTrim.toFixed(3)}s
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-400 text-xs">정면 트리밍</div>
+                      <div className={`font-mono text-xs font-bold ${videoSyncInfo.frontTrim > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                        {videoSyncInfo.frontTrim.toFixed(3)}s
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {videoSyncInfo.error && (
+                <div className="mt-2 text-red-400 text-xs">
+                  오류: {videoSyncInfo.error}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 시작 전 */}
           {!isAnalyzing && !cameraLoading && (
