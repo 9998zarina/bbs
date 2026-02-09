@@ -371,7 +371,10 @@ function BBSTestPage() {
     stepCount: 0,
     lastSteppingFoot: null,
     cumulativeRotation: 0,
-    lastRotation: 0
+    lastRotation: 0,
+    // 항목 10: 뒤돌아보기용
+    maxLeftRotation: 0,
+    maxRightRotation: 0
   }); // 모션 분석 상태
 
   // 항목 2: 정면 영상 안정성 분석 결과 저장
@@ -2771,7 +2774,7 @@ function BBSTestPage() {
           }
           break;
 
-        // 항목 9: 바닥의 물건 집기
+        // 항목 9: 바닥의 물건 집기 (시간, 안정성, 손 지지 기반 점수)
         case 'pick_up_object':
           if (prev.testPhase === 'waiting') {
             if (isStanding && !isBending) {
@@ -2780,45 +2783,178 @@ function BBSTestPage() {
               message = '바닥의 물건을 집으세요';
               startTime = now;
               actionDetected = false;
+              // 초기 랜드마크 저장
+              initialLandmarksRef.current = landmarks;
             }
           } else if (prev.testPhase === 'detecting') {
-            if (isBending) {
+            // advancedAnalysis 활용 (analyzeItem9 결과)
+            const bendingInfo = advancedAnalysis;
+            const bendingDepth = bendingInfo?.bending?.bendingDepth || 0;
+
+            if (isBending || bendingInfo?.bending?.isBending) {
               status = '숙이는 중...';
+              message = `굽힘 깊이: ${bendingDepth.toFixed(0)}°`;
               actionDetected = true;
-              confidence = 70;
+              confidence = 50;
+
+              // 손이 바닥 근처인지 확인
+              if (bendingInfo?.handNearFloor) {
+                status = '✓ 물건 집는 중...';
+                message = `굽힘: ${bendingDepth.toFixed(0)}° - 바닥 도달`;
+                confidence = 80;
+              }
             } else if (isStanding && actionDetected) {
+              // 다시 일어섬 - 완료
               newPhase = 'complete';
-              autoScore = { score: 4, reason: '물건 집기 완료' };
-              assessmentReport = { score: 4 };
+              const elapsed = (now - startTime) / 1000;
+
+              // 점수 계산
+              let score = 4;
+              let reasons = [];
+
+              // 기본 완료 메시지
+              reasons.push(`${elapsed.toFixed(1)}초`);
+
+              // 시간 기반 감점 (5초 초과 시)
+              if (elapsed > 5) {
+                score = Math.max(2, score - 1);
+                reasons.push('시간 초과');
+              }
+
+              // 안정성 기반 감점
+              if (stabilityInfo.stability === 'poor' || stabilityInfo.stability === 'unstable') {
+                score = Math.max(1, score - 1);
+                reasons.push('불안정');
+              }
+
+              // 손 지지 사용 시 감점
+              if (handSupportInfo.isUsingHandSupport) {
+                score = Math.max(2, score - 1);
+                reasons.push('손 지지 사용');
+              }
+
+              const reason = `물건 집기 완료 (${reasons.join(', ')})`;
+
+              autoScore = { score, reason };
+              assessmentReport = {
+                score,
+                duration: elapsed,
+                bendingDepth,
+                stability: stabilityInfo.stability,
+                usedHandSupport: handSupportInfo.isUsingHandSupport
+              };
               showResultModal = true;
-              status = '✓ 완료!';
+              status = `✓ 완료! (${score}점)`;
               confidence = 100;
             }
           }
           break;
 
-        // 항목 10: 뒤돌아보기
+        // 항목 10: 뒤돌아보기 (회전 각도, 발 고정 기반 점수)
         case 'look_behind':
           if (prev.testPhase === 'waiting') {
             if (isStanding) {
               newPhase = 'detecting';
               status = '왼쪽으로 뒤돌아보세요';
-              message = '어깨 너머로 뒤를 보세요';
+              message = '어깨 너머로 뒤를 보세요 (발은 고정)';
               startTime = now;
               actionCount = 0;
+              // 초기 랜드마크 저장 (회전 및 발 위치 기준)
+              initialLandmarksRef.current = landmarks;
+              motionStateRef.current.maxLeftRotation = 0;
+              motionStateRef.current.maxRightRotation = 0;
             }
           } else if (prev.testPhase === 'detecting') {
-            if (shoulderRotation && actionCount === 0) {
-              actionCount = 1;
-              status = '왼쪽 회전 감지! 이제 오른쪽으로';
-              confidence = 50;
-            } else if (shoulderRotation && actionCount === 1) {
-              newPhase = 'complete';
-              autoScore = { score: 4, reason: '양쪽 회전 완료' };
-              assessmentReport = { score: 4 };
-              showResultModal = true;
-              status = '✓ 완료!';
-              confidence = 100;
+            // 회전 정보 (rotationInfo는 이미 위에서 계산됨)
+            const rotation = rotationInfo.rotationChange;
+            const absRotation = Math.abs(rotation);
+
+            // 발 이동 확인
+            const feetMoved = initialLandmarksRef.current ?
+              Math.abs(landmarks[27].x - initialLandmarksRef.current[27].x) > 0.05 ||
+              Math.abs(landmarks[28].x - initialLandmarksRef.current[28].x) > 0.05 : false;
+
+            // 최대 회전량 추적 (왼쪽: 음수, 오른쪽: 양수)
+            if (rotation < -10) {
+              motionStateRef.current.maxLeftRotation = Math.max(
+                motionStateRef.current.maxLeftRotation || 0,
+                absRotation
+              );
+            } else if (rotation > 10) {
+              motionStateRef.current.maxRightRotation = Math.max(
+                motionStateRef.current.maxRightRotation || 0,
+                absRotation
+              );
+            }
+
+            const leftDone = (motionStateRef.current.maxLeftRotation || 0) >= 25;
+            const rightDone = (motionStateRef.current.maxRightRotation || 0) >= 25;
+
+            // 발 이동 경고
+            if (feetMoved) {
+              message = '⚠️ 발을 고정하세요!';
+              postureStability = 'warning';
+            }
+
+            // 상태 표시
+            if (actionCount === 0) {
+              // 왼쪽 회전 대기
+              if (leftDone) {
+                actionCount = 1;
+                status = `✓ 왼쪽 완료 (${(motionStateRef.current.maxLeftRotation || 0).toFixed(0)}°)`;
+                message = '이제 오른쪽으로 뒤돌아보세요';
+                confidence = 50;
+              } else if (absRotation > 5 && rotation < 0) {
+                status = `왼쪽 회전: ${absRotation.toFixed(0)}° / 25°`;
+                message = '더 돌아보세요';
+              }
+            } else if (actionCount === 1) {
+              // 오른쪽 회전 대기
+              if (rightDone) {
+                // 완료
+                newPhase = 'complete';
+                const elapsed = (now - startTime) / 1000;
+
+                const leftAngle = motionStateRef.current.maxLeftRotation || 0;
+                const rightAngle = motionStateRef.current.maxRightRotation || 0;
+
+                // 점수 계산
+                let score = 4;
+                let reason = '';
+
+                // 회전 각도 기반 점수
+                if (leftAngle >= 40 && rightAngle >= 40) {
+                  score = 4;
+                  reason = `양쪽 뒤돌아보기 완료 (좌:${leftAngle.toFixed(0)}° 우:${rightAngle.toFixed(0)}°)`;
+                } else if (leftAngle >= 25 && rightAngle >= 25) {
+                  score = 3;
+                  reason = `회전 완료, 각도 약간 부족 (좌:${leftAngle.toFixed(0)}° 우:${rightAngle.toFixed(0)}°)`;
+                } else {
+                  score = 2;
+                  reason = `한쪽만 충분히 회전 (좌:${leftAngle.toFixed(0)}° 우:${rightAngle.toFixed(0)}°)`;
+                }
+
+                // 발 이동 시 감점
+                if (feetMoved) {
+                  score = Math.max(1, score - 1);
+                  reason += ' - 발 이동 감지';
+                }
+
+                autoScore = { score, reason };
+                assessmentReport = {
+                  score,
+                  leftRotation: leftAngle,
+                  rightRotation: rightAngle,
+                  duration: elapsed,
+                  feetMoved
+                };
+                showResultModal = true;
+                status = `✓ 완료! (${score}점)`;
+                confidence = 100;
+              } else if (rotation > 5) {
+                status = `오른쪽 회전: ${rotation.toFixed(0)}° / 25°`;
+                message = '더 돌아보세요';
+              }
             }
           }
           break;
@@ -4206,7 +4342,9 @@ function BBSTestPage() {
       stepCount: 0,
       lastSteppingFoot: null,
       cumulativeRotation: 0,
-      lastRotation: 0
+      lastRotation: 0,
+      maxLeftRotation: 0,
+      maxRightRotation: 0
     };
 
     if (currentItem < 13) {
@@ -4291,7 +4429,9 @@ function BBSTestPage() {
       stepCount: 0,
       lastSteppingFoot: null,
       cumulativeRotation: 0,
-      lastRotation: 0
+      lastRotation: 0,
+      maxLeftRotation: 0,
+      maxRightRotation: 0
     };
   };
 
