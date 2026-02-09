@@ -196,6 +196,7 @@ function BBSTestPage() {
   const [currentItem, setCurrentItem] = useState(0);
   const [scores, setScores] = useState(Array(14).fill(null));
   const [isComplete, setIsComplete] = useState(false);
+  const [shouldComplete, setShouldComplete] = useState(false); // 완료 트리거 플래그
   const [patientInfo, setPatientInfo] = useState({ name: '홍길동', id: 'P-DEMO-001' });
 
   // AI 분석 결과 저장 (각 항목별)
@@ -3788,37 +3789,11 @@ function BBSTestPage() {
     if (currentItem < 13) {
       setCurrentItem(prev => prev + 1);
     } else {
-      // 마지막 항목 완료 시 테스트 종료
-      setScores(prevScores => {
-        setAnalysisResults(prevResults => {
-          const endTime = new Date();
-          setTestEndTime(endTime);
-          const totalScore = prevScores.reduce((a, b) => (a || 0) + (b || 0), 0);
-          const risk = calculateBBSRisk(totalScore);
-          const resultData = {
-            id: Date.now(),
-            type: 'BBS',
-            patient: patientInfo.name || '미입력',
-            patientId: patientInfo.id || '-',
-            date: new Date().toLocaleDateString(),
-            time: new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }),
-            result: `${totalScore}점`,
-            risk: risk.label,
-            details: {
-              totalScore,
-              scores: prevScores,
-              analysisResults: prevResults,
-              testDuration: testStartTime ? Math.round((endTime - testStartTime) / 1000) : null
-            }
-          };
-          addTestResult(resultData);
-          setIsComplete(true);
-          return prevResults;
-        });
-        return prevScores;
-      });
+      // 마지막 항목 완료 시 테스트 종료 플래그 설정
+      console.log('[BBS] 마지막 항목 완료 - shouldComplete 설정');
+      setShouldComplete(true);
     }
-  }, [currentItem, stopAllVideoAnalysis, patientInfo, testStartTime, addTestResult]);
+  }, [currentItem, stopAllVideoAnalysis]);
 
   // ref에 최신 handleScore 저장
   handleScoreRef.current = handleScore;
@@ -3841,6 +3816,7 @@ function BBSTestPage() {
 
   // 테스트 완료
   const completeTest = (finalScores, finalAnalysisResults) => {
+    console.log('[BBS] completeTest 호출됨 - 점수:', finalScores);
     const endTime = new Date();
     setTestEndTime(endTime);
 
@@ -3865,7 +3841,9 @@ function BBSTestPage() {
     };
 
     addTestResult(resultData);
+    console.log('[BBS] setIsComplete(true) 호출 직전');
     setIsComplete(true);
+    console.log('[BBS] setIsComplete(true) 호출 완료');
   };
 
   const getTotalScore = () => scores.reduce((a, b) => (a || 0) + (b || 0), 0);
@@ -3875,6 +3853,7 @@ function BBSTestPage() {
     setScores(Array(14).fill(null));
     setCurrentItem(0);
     setIsComplete(false);
+    setShouldComplete(false);
     setShowSetup(true);
     setPatientInfo({ name: '홍길동', id: 'P-DEMO-001' });
     setIsAnalyzing(false);
@@ -4032,7 +4011,8 @@ function BBSTestPage() {
 
     // 마지막 항목이면 테스트 완료
     if (currentItem >= 13) {
-      completeTest(newScores, analysisResults);
+      console.log('[BBS] goToNextItem - 마지막 항목 완료');
+      setShouldComplete(true);
     } else {
       setCurrentItem(currentItem + 1);
     }
@@ -4067,7 +4047,8 @@ function BBSTestPage() {
     setCurrentLandmarks(null);
 
     // 테스트 완료
-    completeTest(newScores, analysisResults);
+    console.log('[BBS] emergencyStop - 긴급 종료');
+    setShouldComplete(true);
   };
 
   // 컴포넌트 언마운트 시에만 정리 (URL은 업로드 핸들러에서 관리)
@@ -4216,6 +4197,40 @@ function BBSTestPage() {
       };
     }
   }, []);
+
+  // 테스트 완료 처리 (shouldComplete 플래그 감지)
+  useEffect(() => {
+    if (shouldComplete && !isComplete) {
+      console.log('[BBS] shouldComplete 감지 - 테스트 완료 처리 시작');
+      const endTime = new Date();
+      setTestEndTime(endTime);
+
+      const totalScore = scores.reduce((a, b) => (a || 0) + (b || 0), 0);
+      const risk = calculateBBSRisk(totalScore);
+
+      const resultData = {
+        id: Date.now(),
+        type: 'BBS',
+        patient: patientInfo.name || '미입력',
+        patientId: patientInfo.id || '-',
+        date: new Date().toLocaleDateString(),
+        time: new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }),
+        result: `${totalScore}점`,
+        risk: risk.label,
+        details: {
+          totalScore,
+          scores: scores,
+          analysisResults: analysisResults,
+          testDuration: testStartTime ? Math.round((endTime - testStartTime) / 1000) : null
+        }
+      };
+
+      addTestResult(resultData);
+      console.log('[BBS] 결과 저장 완료, isComplete 설정');
+      setShouldComplete(false);
+      setIsComplete(true);
+    }
+  }, [shouldComplete, isComplete, scores, analysisResults, patientInfo, testStartTime, addTestResult]);
 
   // 자동 진행 제거됨 - 수동으로 '다음 항목' 버튼 클릭 필요
 
@@ -4555,6 +4570,7 @@ function BBSTestPage() {
 
   // 완료 화면 - 상세 문진표
   if (isComplete) {
+    console.log('[BBS] 결과 화면 렌더링 - isComplete:', isComplete);
     const risk = getRiskLevel();
     const totalScore = getTotalScore();
     const testDate = new Date().toLocaleDateString('ko-KR', {
